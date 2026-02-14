@@ -114,7 +114,7 @@ describe("MCP Server", () => {
 
     const result = await client.callTool({
       name: "stash_read",
-      arguments: { path: "test:hello.md" },
+      arguments: { stash: "test", path: "hello.md" },
     });
     const data = JSON.parse((result.content as any)[0].text);
     expect(data.content).toBe("Hello, world!");
@@ -125,7 +125,7 @@ describe("MCP Server", () => {
 
     const result = await client.callTool({
       name: "stash_read",
-      arguments: { path: "test:nope.md" },
+      arguments: { stash: "test", path: "nope.md" },
     });
     const data = JSON.parse((result.content as any)[0].text);
     expect(data.error).toContain("File not found");
@@ -134,7 +134,7 @@ describe("MCP Server", () => {
   it("stash_read: should error on missing stash", async () => {
     const result = await client.callTool({
       name: "stash_read",
-      arguments: { path: "nope:file.md" },
+      arguments: { stash: "nope", path: "file.md" },
     });
     const data = JSON.parse((result.content as any)[0].text);
     expect(data.error).toContain("Stash not found");
@@ -145,7 +145,7 @@ describe("MCP Server", () => {
 
     const result = await client.callTool({
       name: "stash_write",
-      arguments: { path: "test:hello.md", content: "Hello!" },
+      arguments: { stash: "test", path: "hello.md", content: "Hello!" },
     });
     const data = JSON.parse((result.content as any)[0].text);
     expect(data.success).toBe(true);
@@ -164,7 +164,8 @@ describe("MCP Server", () => {
     const result = await client.callTool({
       name: "stash_write",
       arguments: {
-        path: "test:file.md",
+        stash: "test",
+        path: "file.md",
         patch: { start: 5, end: 5, text: "," },
       },
     });
@@ -181,7 +182,7 @@ describe("MCP Server", () => {
 
     const result = await client.callTool({
       name: "stash_write",
-      arguments: { path: "test:file.md" },
+      arguments: { stash: "test", path: "file.md" },
     });
     const data = JSON.parse((result.content as any)[0].text);
     expect(data.error).toContain("Must provide content or patch");
@@ -194,7 +195,7 @@ describe("MCP Server", () => {
 
     const result = await client.callTool({
       name: "stash_delete",
-      arguments: { path: "test:file.md" },
+      arguments: { stash: "test", path: "file.md" },
     });
     const data = JSON.parse((result.content as any)[0].text);
     expect(data.success).toBe(true);
@@ -209,7 +210,7 @@ describe("MCP Server", () => {
 
     const result = await client.callTool({
       name: "stash_delete",
-      arguments: { path: "test:nope.md" },
+      arguments: { stash: "test", path: "nope.md" },
     });
     const data = JSON.parse((result.content as any)[0].text);
     expect(data.error).toContain("File not found");
@@ -222,7 +223,7 @@ describe("MCP Server", () => {
 
     const result = await client.callTool({
       name: "stash_move",
-      arguments: { from: "test:old.md", to: "test:new.md" },
+      arguments: { stash: "test", from: "old.md", to: "new.md" },
     });
     const data = JSON.parse((result.content as any)[0].text);
     expect(data.success).toBe(true);
@@ -238,24 +239,9 @@ describe("MCP Server", () => {
 
     const result = await client.callTool({
       name: "stash_move",
-      arguments: { from: "test:nope.md", to: "test:new.md" },
+      arguments: { stash: "test", from: "nope.md", to: "new.md" },
     });
     const data = JSON.parse((result.content as any)[0].text);
     expect(data.error).toContain("File not found");
-  });
-
-  it("stash_move: should error on cross-stash move", async () => {
-    await manager.create("alpha");
-    await manager.create("beta");
-    const stash = manager.get("alpha")!;
-    stash.write("file.md", "content");
-    await stash.flush();
-
-    const result = await client.callTool({
-      name: "stash_move",
-      arguments: { from: "alpha:file.md", to: "beta:file.md" },
-    });
-    const data = JSON.parse((result.content as any)[0].text);
-    expect(data.error).toContain("Cross-stash moves not supported");
   });
 });
