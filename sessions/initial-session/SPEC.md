@@ -359,9 +359,9 @@ repo/
     structure.automerge          # Structure document
     docs/
       <docId>.automerge          # File documents
-  readme.md                      # Rendered plain text (read-only)
-  docs/
-    guide.md                     # Rendered plain text (read-only)
+  hello.md                       # Rendered plain text (read-only)
+  notes/
+    todo.md                      # Rendered plain text (read-only)
 ```
 
 - Automerge state stored in `.stash/` directory
