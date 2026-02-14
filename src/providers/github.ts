@@ -10,7 +10,7 @@ interface TreeEntry {
   mode: "100644";
   type: "blob";
   content?: string;
-  sha?: string | null;
+  sha?: string | null;  // null = delete file
 }
 
 export class GitHubProvider implements SyncProvider {
@@ -86,7 +86,17 @@ export class GitHubProvider implements SyncProvider {
       // 1. Fetch remote docs
       const remoteDocs = await this.fetch();
 
-      // 2. Merge all locally
+      // 2. Get remote file paths (for deletion tracking)
+      const remoteFilePaths = new Set<string>();
+      const remoteStructure = remoteDocs.get("structure");
+      if (remoteStructure) {
+        const remoteStructureDoc = Automerge.load<StructureDoc>(remoteStructure);
+        for (const filePath of Object.keys(remoteStructureDoc.files)) {
+          remoteFilePaths.add(filePath);
+        }
+      }
+
+      // 3. Merge all locally
       const merged = new Map<string, Uint8Array>();
       for (const [docId, localData] of localDocs) {
         let doc = Automerge.load<unknown>(localData);
@@ -98,15 +108,26 @@ export class GitHubProvider implements SyncProvider {
         merged.set(docId, Automerge.save(doc));
       }
 
-      // 3. Include remote-only docs
+      // 4. Include remote-only docs
       for (const [docId, remoteData] of remoteDocs) {
         if (!localDocs.has(docId)) {
           merged.set(docId, remoteData);
         }
       }
 
-      // 4. Push all changes atomically
-      await this.push(merged);
+      // 5. Find deleted file paths
+      const mergedFilePaths = new Set<string>();
+      const mergedStructure = merged.get("structure");
+      if (mergedStructure) {
+        const mergedStructureDoc = Automerge.load<StructureDoc>(mergedStructure);
+        for (const filePath of Object.keys(mergedStructureDoc.files)) {
+          mergedFilePaths.add(filePath);
+        }
+      }
+      const deletedPaths = [...remoteFilePaths].filter(p => !mergedFilePaths.has(p));
+
+      // 6. Push all changes atomically (including deletions)
+      await this.push(merged, deletedPaths);
 
       return merged;
     } catch (err) {
@@ -159,7 +180,7 @@ export class GitHubProvider implements SyncProvider {
     return docs;
   }
 
-  private async push(docs: Map<string, Uint8Array>): Promise<void> {
+  private async push(docs: Map<string, Uint8Array>, deletedPaths: string[] = []): Promise<void> {
     // Nothing to push if no docs
     if (docs.size === 0) return;
 
@@ -193,6 +214,16 @@ export class GitHubProvider implements SyncProvider {
     // Render plain text files
     const plainTextEntries = this.renderPlainText(docs);
     treeEntries.push(...plainTextEntries);
+
+    // Delete removed files (set sha to null)
+    for (const deletedPath of deletedPaths) {
+      treeEntries.push({
+        path: deletedPath,
+        mode: "100644",
+        type: "blob",
+        sha: null,
+      });
+    }
 
     // Get current commit SHA
     let baseTreeSha: string | undefined;

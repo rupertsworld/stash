@@ -159,7 +159,7 @@ function parsePath(path: string): { stash: string; filePath: string } | null {
   };
 }
 
-async function handleList(
+function handleList(
   manager: StashManager,
   args: Record<string, unknown> | undefined,
 ) {
@@ -176,14 +176,11 @@ async function handleList(
   const stash = manager.get(parsed.stash);
   if (!stash) return errorResponse(`Stash not found: ${parsed.stash}`);
 
-  // Sync before reading to get latest remote state
-  await stash.sync();
-
   const items = stash.list(parsed.filePath || undefined);
   return jsonResponse({ items });
 }
 
-async function handleGlob(
+function handleGlob(
   manager: StashManager,
   args: Record<string, unknown> | undefined,
 ) {
@@ -197,14 +194,11 @@ async function handleGlob(
   const stash = manager.get(stashName);
   if (!stash) return errorResponse(`Stash not found: ${stashName}`);
 
-  // Sync before reading to get latest remote state
-  await stash.sync();
-
   const files = stash.glob(pattern);
   return jsonResponse({ files });
 }
 
-async function handleRead(
+function handleRead(
   manager: StashManager,
   args: Record<string, unknown> | undefined,
 ) {
@@ -218,9 +212,6 @@ async function handleRead(
   const stash = manager.get(stashName);
   if (!stash) return errorResponse(`Stash not found: ${stashName}`);
 
-  // Sync before reading to get latest remote state
-  await stash.sync();
-
   try {
     const content = stash.read(path);
     return jsonResponse({ content });
@@ -229,7 +220,7 @@ async function handleRead(
   }
 }
 
-async function handleWrite(
+function handleWrite(
   manager: StashManager,
   args: Record<string, unknown> | undefined,
 ) {
@@ -250,24 +241,20 @@ async function handleWrite(
   const stash = manager.get(stashName);
   if (!stash) return errorResponse(`Stash not found: ${stashName}`);
 
-  // Sync before writing to merge with remote state
-  await stash.sync();
-
   try {
     if (patch) {
       stash.patch(path, patch.start, patch.end, patch.text);
     } else {
       stash.write(path, content!);
     }
-    // Sync after writing to push changes
-    await stash.sync();
+    // stash.write/patch triggers background save + debounced sync
     return jsonResponse({ success: true });
   } catch (err) {
     return errorResponse((err as Error).message);
   }
 }
 
-async function handleDelete(
+function handleDelete(
   manager: StashManager,
   args: Record<string, unknown> | undefined,
 ) {
@@ -281,20 +268,16 @@ async function handleDelete(
   const stash = manager.get(stashName);
   if (!stash) return errorResponse(`Stash not found: ${stashName}`);
 
-  // Sync before deleting to merge with remote state
-  await stash.sync();
-
   try {
     stash.delete(path);
-    // Sync after deleting to push changes
-    await stash.sync();
+    // stash.delete triggers background save + debounced sync
     return jsonResponse({ success: true });
   } catch (err) {
     return errorResponse((err as Error).message);
   }
 }
 
-async function handleMove(
+function handleMove(
   manager: StashManager,
   args: Record<string, unknown> | undefined,
 ) {
@@ -309,13 +292,9 @@ async function handleMove(
   const stash = manager.get(stashName);
   if (!stash) return errorResponse(`Stash not found: ${stashName}`);
 
-  // Sync before moving to merge with remote state
-  await stash.sync();
-
   try {
     stash.move(from, to);
-    // Sync after moving to push changes
-    await stash.sync();
+    // stash.move triggers background save + debounced sync
     return jsonResponse({ success: true });
   } catch (err) {
     return errorResponse((err as Error).message);
