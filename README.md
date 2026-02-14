@@ -71,14 +71,16 @@ Stash includes an MCP server that AI agents can use to interact with stashes. Th
 | `stash_delete` | Delete a file |
 | `stash_move` | Move or rename a file |
 
-### Tool parameters
+### Path format
 
-MCP tools use separate `stash` and `path` parameters:
+MCP tools use the format `stash-name:filepath`:
 
 - `stash_list({})` - List all stashes
-- `stash_list({ stash: "my-stash" })` - List files in stash root
-- `stash_list({ stash: "my-stash", path: "notes/" })` - List files in a subdirectory
-- `stash_read({ stash: "my-stash", path: "notes/todo.md" })` - Read a specific file
+- `stash_list({ path: "my-stash:" })` - List files in stash root
+- `stash_list({ path: "my-stash:notes/" })` - List files in a subdirectory
+- `stash_read({ path: "my-stash:notes/todo.md" })` - Read a specific file
+
+Each tool call syncs with remote storage before executing, so the daemon is optional.
 
 ### Installing the MCP server
 

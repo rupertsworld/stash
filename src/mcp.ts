@@ -16,14 +16,14 @@ export function createMcpServer(manager: StashManager): Server {
       {
         name: "stash_list",
         description:
-          "List stashes or files within a stash. No args = list stashes. With stash = list root. With stash+path = list in dir.",
+          "List stashes or immediate children within a path. No path = list stashes. 'stash:' = list root. 'stash:dir/' = list in dir.",
         inputSchema: {
           type: "object" as const,
           properties: {
-            stash: { type: "string", description: "Stash name (optional)" },
             path: {
               type: "string",
-              description: "Directory path within stash (optional)",
+              description:
+                'Empty = list stashes. "stash:" = list root. "stash:dir/" = list in dir.',
             },
           },
         },
@@ -49,10 +49,12 @@ export function createMcpServer(manager: StashManager): Server {
         inputSchema: {
           type: "object" as const,
           properties: {
-            stash: { type: "string", description: "Stash name" },
-            path: { type: "string", description: "File path within stash" },
+            path: {
+              type: "string",
+              description: '"stash-name:filepath"',
+            },
           },
-          required: ["stash", "path"],
+          required: ["path"],
         },
       },
       {
@@ -62,8 +64,10 @@ export function createMcpServer(manager: StashManager): Server {
         inputSchema: {
           type: "object" as const,
           properties: {
-            stash: { type: "string", description: "Stash name" },
-            path: { type: "string", description: "File path within stash" },
+            path: {
+              type: "string",
+              description: '"stash-name:filepath"',
+            },
             content: {
               type: "string",
               description: "Full content (creates file if new)",
@@ -79,7 +83,7 @@ export function createMcpServer(manager: StashManager): Server {
               required: ["start", "end", "text"],
             },
           },
-          required: ["stash", "path"],
+          required: ["path"],
         },
       },
       {
@@ -88,10 +92,12 @@ export function createMcpServer(manager: StashManager): Server {
         inputSchema: {
           type: "object" as const,
           properties: {
-            stash: { type: "string", description: "Stash name" },
-            path: { type: "string", description: "File path within stash" },
+            path: {
+              type: "string",
+              description: '"stash-name:filepath"',
+            },
           },
-          required: ["stash", "path"],
+          required: ["path"],
         },
       },
       {
@@ -101,11 +107,16 @@ export function createMcpServer(manager: StashManager): Server {
         inputSchema: {
           type: "object" as const,
           properties: {
-            stash: { type: "string", description: "Stash name" },
-            from: { type: "string", description: "Source file path" },
-            to: { type: "string", description: "Destination file path" },
+            from: {
+              type: "string",
+              description: '"stash-name:filepath"',
+            },
+            to: {
+              type: "string",
+              description: '"stash-name:filepath" (must be same stash)',
+            },
           },
-          required: ["stash", "from", "to"],
+          required: ["from", "to"],
         },
       },
     ],
@@ -113,6 +124,9 @@ export function createMcpServer(manager: StashManager): Server {
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args } = request.params;
+
+    // Reload to pick up external changes before each operation
+    await manager.reload();
 
     switch (name) {
       case "stash_list":
@@ -147,26 +161,40 @@ function jsonResponse(data: unknown) {
   };
 }
 
-function handleList(
+function parsePath(path: string): { stash: string; filePath: string } | null {
+  const colonIndex = path.indexOf(":");
+  if (colonIndex === -1) return null;
+  return {
+    stash: path.slice(0, colonIndex),
+    filePath: path.slice(colonIndex + 1),
+  };
+}
+
+async function handleList(
   manager: StashManager,
   args: Record<string, unknown> | undefined,
 ) {
-  const stashName = args?.stash as string | undefined;
   const path = args?.path as string | undefined;
 
-  if (!stashName) {
+  if (!path) {
     // List stashes
     return jsonResponse({ items: manager.list() });
   }
 
-  const stash = manager.get(stashName);
-  if (!stash) return errorResponse(`Stash not found: ${stashName}`);
+  const parsed = parsePath(path);
+  if (!parsed) return errorResponse(`Invalid path format: ${path}`);
 
-  const items = stash.list(path || undefined);
+  const stash = manager.get(parsed.stash);
+  if (!stash) return errorResponse(`Stash not found: ${parsed.stash}`);
+
+  // Sync before reading to get latest remote state
+  await stash.sync();
+
+  const items = stash.list(parsed.filePath || undefined);
   return jsonResponse({ items });
 }
 
-function handleGlob(
+async function handleGlob(
   manager: StashManager,
   args: Record<string, unknown> | undefined,
 ) {
@@ -180,104 +208,128 @@ function handleGlob(
   const stash = manager.get(stashName);
   if (!stash) return errorResponse(`Stash not found: ${stashName}`);
 
+  // Sync before reading to get latest remote state
+  await stash.sync();
+
   const files = stash.glob(pattern);
   return jsonResponse({ files });
 }
 
-function handleRead(
+async function handleRead(
   manager: StashManager,
   args: Record<string, unknown> | undefined,
 ) {
-  const stashName = args?.stash as string;
   const path = args?.path as string;
+  if (!path) return errorResponse("path is required");
 
-  if (!stashName || !path) {
-    return errorResponse("stash and path are required");
-  }
+  const parsed = parsePath(path);
+  if (!parsed) return errorResponse(`Invalid path format: ${path}`);
 
-  const stash = manager.get(stashName);
-  if (!stash) return errorResponse(`Stash not found: ${stashName}`);
+  const stash = manager.get(parsed.stash);
+  if (!stash) return errorResponse(`Stash not found: ${parsed.stash}`);
+
+  // Sync before reading to get latest remote state
+  await stash.sync();
 
   try {
-    const content = stash.read(path);
+    const content = stash.read(parsed.filePath);
     return jsonResponse({ content });
   } catch (err) {
-    return errorResponse(`File not found: ${path}`);
+    return errorResponse(`File not found: ${parsed.filePath}`);
   }
 }
 
-function handleWrite(
+async function handleWrite(
   manager: StashManager,
   args: Record<string, unknown> | undefined,
 ) {
-  const stashName = args?.stash as string;
   const path = args?.path as string;
   const content = args?.content as string | undefined;
   const patch = args?.patch as
     | { start: number; end: number; text: string }
     | undefined;
 
-  if (!stashName || !path) {
-    return errorResponse("stash and path are required");
-  }
+  if (!path) return errorResponse("path is required");
   if (content === undefined && !patch) {
     return errorResponse("Must provide content or patch");
   }
 
-  const stash = manager.get(stashName);
-  if (!stash) return errorResponse(`Stash not found: ${stashName}`);
+  const parsed = parsePath(path);
+  if (!parsed) return errorResponse(`Invalid path format: ${path}`);
+
+  const stash = manager.get(parsed.stash);
+  if (!stash) return errorResponse(`Stash not found: ${parsed.stash}`);
+
+  // Sync before writing to merge with remote state
+  await stash.sync();
 
   try {
     if (patch) {
-      stash.patch(path, patch.start, patch.end, patch.text);
+      stash.patch(parsed.filePath, patch.start, patch.end, patch.text);
     } else {
-      stash.write(path, content!);
+      stash.write(parsed.filePath, content!);
     }
+    // Sync after writing to push changes
+    await stash.sync();
     return jsonResponse({ success: true });
   } catch (err) {
     return errorResponse((err as Error).message);
   }
 }
 
-function handleDelete(
+async function handleDelete(
   manager: StashManager,
   args: Record<string, unknown> | undefined,
 ) {
-  const stashName = args?.stash as string;
   const path = args?.path as string;
+  if (!path) return errorResponse("path is required");
 
-  if (!stashName || !path) {
-    return errorResponse("stash and path are required");
-  }
+  const parsed = parsePath(path);
+  if (!parsed) return errorResponse(`Invalid path format: ${path}`);
 
-  const stash = manager.get(stashName);
-  if (!stash) return errorResponse(`Stash not found: ${stashName}`);
+  const stash = manager.get(parsed.stash);
+  if (!stash) return errorResponse(`Stash not found: ${parsed.stash}`);
+
+  // Sync before deleting to merge with remote state
+  await stash.sync();
 
   try {
-    stash.delete(path);
+    stash.delete(parsed.filePath);
+    // Sync after deleting to push changes
+    await stash.sync();
     return jsonResponse({ success: true });
   } catch (err) {
     return errorResponse((err as Error).message);
   }
 }
 
-function handleMove(
+async function handleMove(
   manager: StashManager,
   args: Record<string, unknown> | undefined,
 ) {
-  const stashName = args?.stash as string;
   const from = args?.from as string;
   const to = args?.to as string;
 
-  if (!stashName || !from || !to) {
-    return errorResponse("stash, from, and to are required");
+  if (!from || !to) return errorResponse("from and to are required");
+
+  const parsedFrom = parsePath(from);
+  const parsedTo = parsePath(to);
+  if (!parsedFrom) return errorResponse(`Invalid path format: ${from}`);
+  if (!parsedTo) return errorResponse(`Invalid path format: ${to}`);
+  if (parsedFrom.stash !== parsedTo.stash) {
+    return errorResponse("Cross-stash moves not supported");
   }
 
-  const stash = manager.get(stashName);
-  if (!stash) return errorResponse(`Stash not found: ${stashName}`);
+  const stash = manager.get(parsedFrom.stash);
+  if (!stash) return errorResponse(`Stash not found: ${parsedFrom.stash}`);
+
+  // Sync before moving to merge with remote state
+  await stash.sync();
 
   try {
-    stash.move(from, to);
+    stash.move(parsedFrom.filePath, parsedTo.filePath);
+    // Sync after moving to push changes
+    await stash.sync();
     return jsonResponse({ success: true });
   } catch (err) {
     return errorResponse((err as Error).message);
