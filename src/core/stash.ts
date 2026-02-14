@@ -39,6 +39,7 @@ export class Stash {
   private dirty = false;
   private savePromise: Promise<void> | null = null;
   private syncTimeout: ReturnType<typeof setTimeout> | null = null;
+  private syncing = false;
   private static SYNC_DEBOUNCE_MS = 2000;
 
   constructor(
@@ -223,9 +224,23 @@ export class Stash {
     return allPaths.filter((p) => minimatch(p, pattern)).sort();
   }
 
+  isSyncing(): boolean {
+    return this.syncing;
+  }
+
   async sync(): Promise<void> {
     if (!this.provider) return;
+    if (this.syncing) return; // Already syncing
 
+    this.syncing = true;
+    try {
+      await this.doSync();
+    } finally {
+      this.syncing = false;
+    }
+  }
+
+  private async doSync(): Promise<void> {
     // 1. Pre-sync: create empty docs for dangling refs
     for (const [filePath, entry] of Object.entries(this.structureDoc.files)) {
       if (!this.fileDocs.has(entry.docId)) {

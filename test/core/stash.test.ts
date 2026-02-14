@@ -259,6 +259,7 @@ describe("Stash", () => {
           return true;
         },
         async create() {},
+        async delete() {},
       };
 
       const stash = Stash.create("test", tmpDir, mockProvider, "mock", "mock:test");
@@ -271,6 +272,79 @@ describe("Stash", () => {
       // Wait for debounce + sync
       await new Promise((r) => setTimeout(r, 2500));
       expect(syncCalled).toBe(true);
+    });
+
+    it("should report isSyncing() during sync", async () => {
+      let resolveSync: () => void;
+      const syncPromise = new Promise<void>((r) => { resolveSync = r; });
+
+      const mockProvider: SyncProvider = {
+        async sync(docs) {
+          await syncPromise;
+          return docs;
+        },
+        async exists() { return true; },
+        async create() {},
+        async delete() {},
+      };
+
+      const stash = Stash.create("test", tmpDir, mockProvider, "mock", "mock:test");
+      stash.write("file.md", "content");
+      await stash.flush();
+
+      expect(stash.isSyncing()).toBe(false);
+
+      const syncOp = stash.sync();
+      // Give it a tick to start
+      await new Promise((r) => setTimeout(r, 10));
+
+      expect(stash.isSyncing()).toBe(true);
+
+      resolveSync!();
+      await syncOp;
+
+      expect(stash.isSyncing()).toBe(false);
+    });
+
+    it("should skip concurrent sync calls", async () => {
+      let syncCount = 0;
+      let resolveSync: () => void;
+      const syncPromise = new Promise<void>((r) => { resolveSync = r; });
+
+      const mockProvider: SyncProvider = {
+        async sync(docs) {
+          syncCount++;
+          await syncPromise;
+          return docs;
+        },
+        async exists() { return true; },
+        async create() {},
+        async delete() {},
+      };
+
+      const stash = Stash.create("test", tmpDir, mockProvider, "mock", "mock:test");
+      stash.write("file.md", "content");
+      await stash.flush();
+
+      // Start first sync
+      const sync1 = stash.sync();
+      await new Promise((r) => setTimeout(r, 10));
+
+      // Try second sync while first is running
+      const sync2 = stash.sync();
+
+      // Second should return immediately (skipped)
+      await sync2;
+
+      // First is still running
+      expect(stash.isSyncing()).toBe(true);
+      expect(syncCount).toBe(1);
+
+      // Complete first sync
+      resolveSync!();
+      await sync1;
+
+      expect(syncCount).toBe(1); // Only one sync actually ran
     });
   });
 });
