@@ -1,3 +1,9 @@
+/**
+ * Optional background daemon for periodic syncing.
+ * The MCP server (mcp-server.ts) is the primary interface for AI assistants.
+ * This daemon can be run for additional background sync if desired.
+ */
+
 import express from "express";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { createMcpServer } from "./mcp.js";

@@ -84,25 +84,24 @@ Each tool call syncs with remote storage before executing, so the daemon is opti
 
 ### Installing the MCP server
 
-Run the install command to automatically configure the MCP server:
+For Claude Code, add the MCP server directly:
 
 ```bash
-stash install
-# Select which AI assistants to configure (e.g., Claude Code)
+claude mcp add stash node /path/to/stash/dist/mcp-server.js
 ```
 
-This writes the MCP configuration to the appropriate config file for each selected assistant.
+Or run `stash install` to see the configuration for other MCP clients.
 
 #### Manual configuration (Claude Desktop)
 
-Alternatively, add to your Claude Desktop config (`~/Library/Application Support/Claude/claude_desktop_config.json`):
+Add to your Claude Desktop config (`~/Library/Application Support/Claude/claude_desktop_config.json`):
 
 ```json
 {
   "mcpServers": {
     "stash": {
       "command": "node",
-      "args": ["/path/to/stash/dist/daemon.js"]
+      "args": ["/path/to/stash/dist/mcp-server.js"]
     }
   }
 }
