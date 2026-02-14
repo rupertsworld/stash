@@ -43,6 +43,14 @@ stash create my-project
 stash join github:username/repo-name --name local-name
 ```
 
+### Start the daemon
+
+```bash
+stash start
+```
+
+The daemon watches for local changes and syncs automatically.
+
 ## CLI Commands
 
 | Command | Description |
@@ -60,7 +68,7 @@ stash join github:username/repo-name --name local-name
 
 ## MCP Server
 
-Stash includes an MCP server that AI agents can use to interact with stashes. The daemon exposes these tools:
+Stash includes an MCP server that AI agents can use to interact with stashes:
 
 | Tool | Description |
 |------|-------------|
@@ -71,20 +79,24 @@ Stash includes an MCP server that AI agents can use to interact with stashes. Th
 | `stash_delete` | Delete a file |
 | `stash_move` | Move or rename a file |
 
-### Path format
+### Tool parameters
 
-MCP tools use the format `stash-name:filepath`:
+Most tools use separate `stash` and `path` parameters:
 
-- `stash_list({})` - List all stashes
-- `stash_list({ path: "my-stash:" })` - List files in stash root
-- `stash_list({ path: "my-stash:notes/" })` - List files in a subdirectory
-- `stash_read({ path: "my-stash:notes/todo.md" })` - Read a specific file
+```
+stash_list({})                                    # List all stashes
+stash_list({ path: "my-stash:" })                 # List files in stash root
+stash_read({ stash: "my-stash", path: "todo.md" }) # Read a file
+stash_write({ stash: "my-stash", path: "todo.md", content: "..." })
+stash_delete({ stash: "my-stash", path: "old.md" })
+stash_move({ stash: "my-stash", from: "old.md", to: "new.md" })
+```
 
-Each tool call syncs with remote storage before executing, so the daemon is optional.
+MCP tools operate on local state for fast response. The daemon handles syncing in the background.
 
 ### Installing the MCP server
 
-For Claude Code, add the MCP server directly:
+For Claude Code:
 
 ```bash
 claude mcp add stash node /path/to/stash/dist/mcp-server.js
@@ -109,10 +121,10 @@ Add to your Claude Desktop config (`~/Library/Application Support/Claude/claude_
 
 ## How It Works
 
-1. **Local storage**: Each stash is a folder containing your files plus Automerge binary state
+1. **Local storage**: Each stash is a folder containing Automerge binary state in `~/.stash/<name>/`
 2. **CRDT sync**: File changes are tracked as Automerge operations, enabling automatic conflict resolution
 3. **GitHub backend**: Synced stashes push Automerge state to `.stash/docs/` and readable files to the repo root
-4. **Daemon**: The background daemon handles periodic syncing and serves the MCP interface
+4. **Daemon**: Watches for local changes and syncs automatically (also syncs every 30s as fallback)
 
 ## Development
 
