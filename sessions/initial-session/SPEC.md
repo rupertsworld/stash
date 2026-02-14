@@ -30,12 +30,17 @@ Without Automerge, we'd need conflict detection, 3-way merge strategies, user in
 ┌─────────────────────────────────────────┐
 │          Daemon (stash start)           │
 │  - Background process                   │
-│  - Runs MCP server                      │
+│  - HTTP server (Express)                │
 │  - Sync loop (interval-based)           │
 └─────────────────┬───────────────────────┘
                   │
 ┌─────────────────▼───────────────────────┐
-│             MCP Server                  │
+│         MCP over HTTP                   │
+│  POST /mcp (Streamable HTTP transport)  │
+└─────────────────┬───────────────────────┘
+                  │
+┌─────────────────▼───────────────────────┐
+│        MCP Tools (mcp.ts)               │
 │  (read, write, list, glob, delete, move)│
 └─────────────────┬───────────────────────┘
                   │
@@ -421,7 +426,7 @@ stash status
 ```bash
 stash start
 # Starts background daemon
-# - MCP server over stdio
+# - HTTP server with MCP endpoint
 # - Sync loop (default 30s interval)
 
 stash stop
@@ -430,6 +435,114 @@ stash stop
 stash install
 # Configures MCP server for AI assistants (e.g., Claude Code)
 ```
+
+## MCP Server
+
+The daemon exposes MCP tools over HTTP using the Streamable HTTP transport. The implementation is modular: `mcp.ts` defines tools and creates the MCP server, while `daemon.ts` handles HTTP transport.
+
+### Transport
+
+Uses MCP's **Streamable HTTP** transport (spec 2025-03-26):
+
+- Single endpoint: `POST /mcp`
+- Stateless request/response (no session management needed)
+- Supports SSE for streaming responses (optional, not used in v1)
+
+### Client Configuration
+
+```json
+{
+  "mcpServers": {
+    "stash": {
+      "url": "http://localhost:32847/mcp"
+    }
+  }
+}
+```
+
+Port `32847` is the default (mnemonic: "STASH" on a phone keypad, truncated).
+
+### Implementation
+
+```typescript
+// mcp.ts - Transport-agnostic MCP server
+import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { StashManager } from "./core/manager.js";
+
+export function createMcpServer(manager: StashManager): Server {
+  const server = new Server(
+    { name: "stash", version: "1.0.0" },
+    { capabilities: { tools: {} } }
+  );
+
+  // Register tools
+  server.setRequestHandler(ListToolsRequestSchema, async () => ({
+    tools: [
+      { name: "stash_list", description: "...", inputSchema: { ... } },
+      { name: "stash_read", description: "...", inputSchema: { ... } },
+      // ... other tools
+    ]
+  }));
+
+  server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    const { name, arguments: args } = request.params;
+    switch (name) {
+      case "stash_list": return handleList(manager, args);
+      case "stash_read": return handleRead(manager, args);
+      // ... other tools
+    }
+  });
+
+  return server;
+}
+```
+
+```typescript
+// daemon.ts - HTTP transport + sync loop
+import express from "express";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { createMcpServer } from "./mcp.js";
+import { StashManager } from "./core/manager.js";
+
+const PORT = 32847;
+
+async function main() {
+  const manager = await StashManager.load();
+  const mcpServer = createMcpServer(manager);
+
+  const app = express();
+  app.use(express.json());
+
+  // MCP endpoint
+  app.post("/mcp", async (req, res) => {
+    const transport = new StreamableHTTPServerTransport({
+      sessionIdGenerator: undefined, // Stateless
+    });
+    res.on("close", () => transport.close());
+    await mcpServer.connect(transport);
+    await transport.handleRequest(req, res, req.body);
+  });
+
+  // Health check
+  app.get("/health", (req, res) => res.json({ status: "ok" }));
+
+  app.listen(PORT, () => {
+    console.log(`Stash daemon listening on http://localhost:${PORT}`);
+  });
+
+  // Sync loop
+  setInterval(() => manager.sync(), 30_000);
+}
+
+main();
+```
+
+### Why This Design
+
+1. **Modular**: `mcp.ts` knows nothing about HTTP; `daemon.ts` knows nothing about MCP tools
+2. **Testable**: Can test MCP tools in isolation without HTTP
+3. **Simple**: Single `/mcp` endpoint, stateless requests, no session management
+4. **Standard**: Uses official MCP SDK transport, compatible with all MCP clients
 
 ## MCP Tools
 
@@ -538,9 +651,8 @@ Move or rename a file within a stash.
 ```
 src/
 ├── cli.ts                   # CLI entry point (commander setup)
-├── daemon.ts                # Background daemon (sync loop + MCP)
-├── mcp/
-│   └── server.ts            # MCP server implementation
+├── daemon.ts                # Background daemon (HTTP server + sync loop)
+├── mcp.ts                   # MCP server setup (tools, transport-agnostic)
 ├── core/
 │   ├── stash.ts             # Stash class (single stash operations)
 │   ├── manager.ts           # StashManager (multi-stash operations)
@@ -594,22 +706,26 @@ class Stash {
 }
 
 // core/manager.ts
+// Facade over all stashes. Used by daemon (sync loop) and MCP (tool handlers).
+// Loads all stashes on startup, provides access by name, handles cross-stash operations.
 class StashManager {
   private stashes: Map<string, Stash>;
 
-  getStash(name: string): Stash | undefined;
-  getAllStashes(): Stash[];
+  static async load(): Promise<StashManager>;  // Load all stashes from ~/.stash/
+  get(name: string): Stash | undefined;
+  list(): string[];                            // Stash names
   async create(name: string, provider: SyncProvider | null): Promise<Stash>;
   async join(key: string, localName: string): Promise<Stash>;
   async delete(name: string, deleteRemote: boolean): Promise<void>;
-  async syncAll(): Promise<void>;
+  async sync(): Promise<void>;                 // Sync all stashes
 }
 ```
 
 ## Dependencies
 
 - **@automerge/automerge** - CRDT implementation
-- **@modelcontextprotocol/sdk** - MCP server
+- **@modelcontextprotocol/sdk** - MCP server + Streamable HTTP transport
+- **express** - HTTP server for daemon
 - **octokit** - GitHub API
 - **commander** - CLI framework
 - **inquirer** - Interactive prompts

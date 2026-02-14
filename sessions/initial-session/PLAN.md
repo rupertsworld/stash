@@ -54,10 +54,13 @@ The v2 architecture uses:
 - [ ] Implement: `src/core/stash.ts`
 
 ### 1.4 Stash Manager
+Facade over all stashes. Used by daemon (sync loop) and MCP (tool handlers).
+- [ ] Test: Load all stashes from ~/.stash/
 - [ ] Test: Create stash
-- [ ] Test: List stashes
+- [ ] Test: List stash names
 - [ ] Test: Get stash by name
 - [ ] Test: Delete stash
+- [ ] Test: Sync all stashes
 - [ ] Implement: `src/core/manager.ts`
 
 ### 1.5 Config
@@ -102,7 +105,7 @@ The v2 architecture uses:
 - [ ] Test: stash_delete
 - [ ] Test: stash_move
 - [ ] Test: Error responses
-- [ ] Implement: `src/mcp/server.ts`
+- [ ] Implement: `src/mcp.ts`
 
 ## Phase 4: CLI Commands
 
@@ -123,8 +126,10 @@ The v2 architecture uses:
 ### 4.3 Daemon
 - [ ] Test: `stash start` spawns background process
 - [ ] Test: `stash stop` kills daemon
+- [ ] Test: Daemon serves HTTP on port 32847
 - [ ] Test: Daemon runs sync loop
-- [ ] Test: `stash install` configures MCP
+- [ ] Test: MCP endpoint responds to POST /mcp
+- [ ] Test: `stash install` configures MCP (writes url to config)
 - [ ] Implement: `src/daemon.ts`, `src/cli/commands/start.ts`
 
 ### 4.4 CLI Entry Point
