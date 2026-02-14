@@ -1,7 +1,7 @@
 import { StashManager } from "../../core/manager.js";
 import { PORT } from "../../daemon.js";
 
-export async function showStatus(baseDir?: string): Promise<void> {
+export async function showStatus(): Promise<void> {
   // Check daemon
   let daemonRunning = false;
   try {
@@ -15,7 +15,7 @@ export async function showStatus(baseDir?: string): Promise<void> {
   console.log(`MCP endpoint: http://localhost:${PORT}/mcp`);
   console.log();
 
-  const manager = await StashManager.load(baseDir);
+  const manager = await StashManager.load();
   const stashes = manager.list();
 
   if (stashes.length === 0) {

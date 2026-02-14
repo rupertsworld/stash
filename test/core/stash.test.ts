@@ -23,17 +23,19 @@ describe("Stash", () => {
     expect(stash.list()).toEqual([]);
   });
 
-  it("should write and read a file", () => {
+  it("should write and read a file", async () => {
     const stash = Stash.create("test", tmpDir);
     stash.write("hello.md", "Hello, world!");
     expect(stash.read("hello.md")).toBe("Hello, world!");
+    await stash.flush();
   });
 
-  it("should overwrite file content", () => {
+  it("should overwrite file content", async () => {
     const stash = Stash.create("test", tmpDir);
     stash.write("file.md", "original");
     stash.write("file.md", "updated");
     expect(stash.read("file.md")).toBe("updated");
+    await stash.flush();
   });
 
   it("should throw when reading non-existent file", () => {
@@ -41,11 +43,12 @@ describe("Stash", () => {
     expect(() => stash.read("nope.md")).toThrow("File not found");
   });
 
-  it("should patch a file", () => {
+  it("should patch a file", async () => {
     const stash = Stash.create("test", tmpDir);
     stash.write("file.md", "Hello world");
     stash.patch("file.md", 5, 5, ",");
     expect(stash.read("file.md")).toBe("Hello, world");
+    await stash.flush();
   });
 
   it("should throw when patching non-existent file", () => {
@@ -55,12 +58,13 @@ describe("Stash", () => {
     );
   });
 
-  it("should delete a file", () => {
+  it("should delete a file", async () => {
     const stash = Stash.create("test", tmpDir);
     stash.write("file.md", "content");
     stash.delete("file.md");
     expect(() => stash.read("file.md")).toThrow("File not found");
     expect(stash.list()).toEqual([]);
+    await stash.flush();
   });
 
   it("should throw when deleting non-existent file", () => {
@@ -68,15 +72,16 @@ describe("Stash", () => {
     expect(() => stash.delete("nope.md")).toThrow("File not found");
   });
 
-  it("should move a file preserving content", () => {
+  it("should move a file preserving content", async () => {
     const stash = Stash.create("test", tmpDir);
     stash.write("old.md", "content here");
     stash.move("old.md", "new.md");
     expect(stash.read("new.md")).toBe("content here");
     expect(() => stash.read("old.md")).toThrow("File not found");
+    await stash.flush();
   });
 
-  it("should list files in root", () => {
+  it("should list files in root", async () => {
     const stash = Stash.create("test", tmpDir);
     stash.write("a.md", "a");
     stash.write("b.md", "b");
@@ -86,9 +91,10 @@ describe("Stash", () => {
     expect(items).toContain("b.md");
     expect(items).toContain("docs/");
     expect(items).toHaveLength(3);
+    await stash.flush();
   });
 
-  it("should list files in a subdirectory", () => {
+  it("should list files in a subdirectory", async () => {
     const stash = Stash.create("test", tmpDir);
     stash.write("docs/a.md", "a");
     stash.write("docs/b.md", "b");
@@ -98,6 +104,7 @@ describe("Stash", () => {
     expect(items).toContain("b.md");
     expect(items).toContain("sub/");
     expect(items).toHaveLength(3);
+    await stash.flush();
   });
 
   it("should return empty list for empty directory", () => {
@@ -105,7 +112,7 @@ describe("Stash", () => {
     expect(stash.list("nonexistent")).toEqual([]);
   });
 
-  it("should glob files", () => {
+  it("should glob files", async () => {
     const stash = Stash.create("test", tmpDir);
     stash.write("readme.md", "r");
     stash.write("docs/guide.md", "g");
@@ -119,13 +126,14 @@ describe("Stash", () => {
     ]);
     expect(stash.glob("docs/*.md")).toEqual(["docs/guide.md"]);
     expect(stash.glob("**/*.ts")).toEqual(["src/index.ts"]);
+    await stash.flush();
   });
 
   it("should save and load from disk", async () => {
     const stash = Stash.create("test", tmpDir);
     stash.write("hello.md", "Hello!");
     stash.write("docs/notes.md", "Notes");
-    await stash.save();
+    await stash.flush();
 
     const loaded = await Stash.load("test", tmpDir);
     expect(loaded.read("hello.md")).toBe("Hello!");
@@ -139,10 +147,15 @@ describe("Stash", () => {
       async sync(docs) {
         return docs;
       },
+      async exists() {
+        return true;
+      },
+      async create() {},
     };
 
     const stash = Stash.create("test", tmpDir, mockProvider, "mock", "mock:test");
     stash.write("file.md", "content");
+    await stash.flush();
     await stash.sync();
 
     // After sync, file should still be readable
@@ -160,10 +173,15 @@ describe("Stash", () => {
       async sync(docs) {
         return docs;
       },
+      async exists() {
+        return true;
+      },
+      async create() {},
     };
 
     const stash = Stash.create("test", tmpDir, mockProvider, "mock", "mock:test");
     stash.write("file.md", "content");
+    await stash.flush();
 
     // Manually create a dangling ref scenario by deleting the file doc
     // We'll test this through sync's pre-sync check
@@ -180,5 +198,79 @@ describe("Stash", () => {
     expect(meta.provider).toBe("github");
     expect(meta.key).toBe("github:owner/repo");
     expect(meta.actorId).toBeTruthy();
+  });
+
+  describe("auto-save and sync", () => {
+    it("should persist to disk after write", async () => {
+      const stash = Stash.create("test", tmpDir);
+      stash.write("file.md", "content");
+      await stash.flush();
+
+      // Load fresh from disk
+      const loaded = await Stash.load("test", tmpDir);
+      expect(loaded.read("file.md")).toBe("content");
+    });
+
+    it("should persist to disk after patch", async () => {
+      const stash = Stash.create("test", tmpDir);
+      stash.write("file.md", "hello world");
+      await stash.flush();
+
+      stash.patch("file.md", 5, 5, ",");
+      await stash.flush();
+
+      const loaded = await Stash.load("test", tmpDir);
+      expect(loaded.read("file.md")).toBe("hello, world");
+    });
+
+    it("should persist to disk after delete", async () => {
+      const stash = Stash.create("test", tmpDir);
+      stash.write("file.md", "content");
+      await stash.flush();
+
+      stash.delete("file.md");
+      await stash.flush();
+
+      const loaded = await Stash.load("test", tmpDir);
+      expect(loaded.list()).toEqual([]);
+    });
+
+    it("should persist to disk after move", async () => {
+      const stash = Stash.create("test", tmpDir);
+      stash.write("old.md", "content");
+      await stash.flush();
+
+      stash.move("old.md", "new.md");
+      await stash.flush();
+
+      const loaded = await Stash.load("test", tmpDir);
+      expect(loaded.read("new.md")).toBe("content");
+      expect(() => loaded.read("old.md")).toThrow("File not found");
+    });
+
+    it("should schedule sync after mutation", async () => {
+      let syncCalled = false;
+      const mockProvider: SyncProvider = {
+        async sync(docs) {
+          syncCalled = true;
+          return docs;
+        },
+        async exists() {
+          return true;
+        },
+        async create() {},
+      };
+
+      const stash = Stash.create("test", tmpDir, mockProvider, "mock", "mock:test");
+      stash.write("file.md", "content");
+      await stash.flush();
+
+      // Sync should be scheduled (debounced)
+      expect(syncCalled).toBe(false);
+
+      // Wait for debounce + sync
+      await new Promise((r) => setTimeout(r, 2500));
+      expect(syncCalled).toBe(true);
+    });
   });
 });

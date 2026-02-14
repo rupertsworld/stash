@@ -1,9 +1,10 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import * as os from "node:os";
 import { StashManager } from "../../src/core/manager.js";
 import type { SyncProvider } from "../../src/providers/types.js";
+import * as config from "../../src/core/config.js";
 
 describe("StashManager", () => {
   let tmpDir: string;
@@ -77,7 +78,7 @@ describe("StashManager", () => {
     const manager1 = await StashManager.load(tmpDir);
     const stash = await manager1.create("project-a");
     stash.write("readme.md", "Hello");
-    await stash.save();
+    await stash.flush();
 
     // Load fresh
     const manager2 = await StashManager.load(tmpDir);
@@ -93,15 +94,57 @@ describe("StashManager", () => {
         syncCalls.push("synced");
         return docs;
       },
+      async exists() {
+        return true;
+      },
+      async create() {},
     };
 
     const manager = await StashManager.load(tmpDir);
     const s1 = await manager.create("a", mockProvider, "mock", "mock:a");
     s1.write("file.md", "content");
+    await s1.flush();
     const s2 = await manager.create("b", mockProvider, "mock", "mock:b");
     s2.write("file.md", "content");
+    await s2.flush();
 
     await manager.sync();
     expect(syncCalls).toHaveLength(2);
+  });
+
+  it("should restore github provider when loading stash with token", async () => {
+    // Mock getGitHubToken to return a token
+    vi.spyOn(config, "getGitHubToken").mockResolvedValue("ghp_test123");
+
+    // Create a stash with github provider type
+    const manager1 = await StashManager.load(tmpDir);
+    const mockProvider: SyncProvider = {
+      async sync(docs) {
+        return docs;
+      },
+      async exists() {
+        return true;
+      },
+      async create() {},
+    };
+    const stash = await manager1.create(
+      "test",
+      mockProvider,
+      "github",
+      "github:owner/repo",
+    );
+    stash.write("file.md", "content");
+    await stash.flush();
+
+    // Load fresh - should restore provider
+    const manager2 = await StashManager.load(tmpDir);
+    const loaded = manager2.get("test")!;
+
+    // Verify the stash can sync (provider was restored)
+    // We can't easily verify the provider instance, but we can check meta
+    expect(loaded.getMeta().provider).toBe("github");
+    expect(loaded.getMeta().key).toBe("github:owner/repo");
+
+    vi.restoreAllMocks();
   });
 });

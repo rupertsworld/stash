@@ -36,6 +36,10 @@ export class Stash {
   private provider: SyncProvider | null;
   private baseDir: string;
   private meta: StashMeta;
+  private dirty = false;
+  private savePromise: Promise<void> | null = null;
+  private syncTimeout: ReturnType<typeof setTimeout> | null = null;
+  private static SYNC_DEBOUNCE_MS = 2000;
 
   constructor(
     name: string,
@@ -153,6 +157,7 @@ export class Stash {
         createFileDoc(content, hexActorId),
       );
     }
+    this.scheduleBackgroundSave();
   }
 
   patch(filePath: string, start: number, end: number, text: string): void {
@@ -161,6 +166,7 @@ export class Stash {
     const doc = this.fileDocs.get(entry.docId);
     if (!doc) throw new Error(`File not found: ${filePath}`);
     this.fileDocs.set(entry.docId, applyPatch(doc, start, end, text));
+    this.scheduleBackgroundSave();
   }
 
   delete(filePath: string): void {
@@ -169,12 +175,14 @@ export class Stash {
     this.structureDoc = removeFile(this.structureDoc, filePath);
     // Orphan the file doc (remove from memory, leave on disk)
     this.fileDocs.delete(entry.docId);
+    this.scheduleBackgroundSave();
   }
 
   move(from: string, to: string): void {
     const entry = getEntry(this.structureDoc, from);
     if (!entry) throw new Error(`File not found: ${from}`);
     this.structureDoc = moveStructureFile(this.structureDoc, from, to);
+    this.scheduleBackgroundSave();
   }
 
   list(dir?: string): string[] {
@@ -290,8 +298,53 @@ export class Stash {
     return { ...this.meta };
   }
 
+  getProvider(): SyncProvider | null {
+    return this.provider;
+  }
+
   setProvider(provider: SyncProvider | null): void {
     this.provider = provider;
+  }
+
+  isDirty(): boolean {
+    return this.dirty;
+  }
+
+  /**
+   * Wait for any pending background saves to complete.
+   * Useful for tests.
+   */
+  async flush(): Promise<void> {
+    if (this.savePromise) {
+      await this.savePromise;
+    }
+  }
+
+  private scheduleBackgroundSave(): void {
+    this.dirty = true;
+
+    // Chain saves to ensure they complete in order
+    const previousSave = this.savePromise ?? Promise.resolve();
+    this.savePromise = previousSave.then(() =>
+      this.save().catch((err) => {
+        console.error(`Save failed for ${this.name}:`, (err as Error).message);
+      })
+    );
+
+    // Debounce sync
+    if (this.syncTimeout) {
+      clearTimeout(this.syncTimeout);
+    }
+    this.syncTimeout = setTimeout(() => {
+      this.syncTimeout = null;
+      this.sync()
+        .then(() => {
+          this.dirty = false;
+        })
+        .catch((err) => {
+          console.error(`Sync failed for ${this.name}:`, (err as Error).message);
+        });
+    }, Stash.SYNC_DEBOUNCE_MS);
   }
 }
 

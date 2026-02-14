@@ -16,14 +16,14 @@ export function createMcpServer(manager: StashManager): Server {
       {
         name: "stash_list",
         description:
-          "List stashes or immediate children within a path. No path = list stashes. 'stash:' = list root. 'stash:dir/' = list in dir.",
+          "List stashes or files within a stash. No args = list stashes. With stash = list root. With stash+path = list in dir.",
         inputSchema: {
           type: "object" as const,
           properties: {
+            stash: { type: "string", description: "Stash name (optional)" },
             path: {
               type: "string",
-              description:
-                'Empty = list stashes. "stash:" = list root. "stash:dir/" = list in dir.',
+              description: "Directory path within stash (optional)",
             },
           },
         },
@@ -49,12 +49,10 @@ export function createMcpServer(manager: StashManager): Server {
         inputSchema: {
           type: "object" as const,
           properties: {
-            path: {
-              type: "string",
-              description: '"stash-name:filepath"',
-            },
+            stash: { type: "string", description: "Stash name" },
+            path: { type: "string", description: "File path within stash" },
           },
-          required: ["path"],
+          required: ["stash", "path"],
         },
       },
       {
@@ -64,10 +62,8 @@ export function createMcpServer(manager: StashManager): Server {
         inputSchema: {
           type: "object" as const,
           properties: {
-            path: {
-              type: "string",
-              description: '"stash-name:filepath"',
-            },
+            stash: { type: "string", description: "Stash name" },
+            path: { type: "string", description: "File path within stash" },
             content: {
               type: "string",
               description: "Full content (creates file if new)",
@@ -83,7 +79,7 @@ export function createMcpServer(manager: StashManager): Server {
               required: ["start", "end", "text"],
             },
           },
-          required: ["path"],
+          required: ["stash", "path"],
         },
       },
       {
@@ -92,12 +88,10 @@ export function createMcpServer(manager: StashManager): Server {
         inputSchema: {
           type: "object" as const,
           properties: {
-            path: {
-              type: "string",
-              description: '"stash-name:filepath"',
-            },
+            stash: { type: "string", description: "Stash name" },
+            path: { type: "string", description: "File path within stash" },
           },
-          required: ["path"],
+          required: ["stash", "path"],
         },
       },
       {
@@ -107,16 +101,11 @@ export function createMcpServer(manager: StashManager): Server {
         inputSchema: {
           type: "object" as const,
           properties: {
-            from: {
-              type: "string",
-              description: '"stash-name:filepath"',
-            },
-            to: {
-              type: "string",
-              description: '"stash-name:filepath" (must be same stash)',
-            },
+            stash: { type: "string", description: "Stash name" },
+            from: { type: "string", description: "Source file path" },
+            to: { type: "string", description: "Destination file path" },
           },
-          required: ["from", "to"],
+          required: ["stash", "from", "to"],
         },
       },
     ],
@@ -146,12 +135,6 @@ export function createMcpServer(manager: StashManager): Server {
   return server;
 }
 
-function parsePath(path: string): { stash: string; filePath: string } | null {
-  const idx = path.indexOf(":");
-  if (idx === -1) return null;
-  return { stash: path.slice(0, idx), filePath: path.slice(idx + 1) };
-}
-
 function errorResponse(error: string) {
   return {
     content: [{ type: "text" as const, text: JSON.stringify({ error }) }],
@@ -168,20 +151,18 @@ function handleList(
   manager: StashManager,
   args: Record<string, unknown> | undefined,
 ) {
-  const path = (args?.path as string) ?? "";
+  const stashName = args?.stash as string | undefined;
+  const path = args?.path as string | undefined;
 
-  if (!path) {
+  if (!stashName) {
     // List stashes
     return jsonResponse({ items: manager.list() });
   }
 
-  const parsed = parsePath(path);
-  if (!parsed) return errorResponse("Invalid path format");
+  const stash = manager.get(stashName);
+  if (!stash) return errorResponse(`Stash not found: ${stashName}`);
 
-  const stash = manager.get(parsed.stash);
-  if (!stash) return errorResponse(`Stash not found: ${parsed.stash}`);
-
-  const items = stash.list(parsed.filePath || undefined);
+  const items = stash.list(path || undefined);
   return jsonResponse({ items });
 }
 
@@ -207,20 +188,21 @@ function handleRead(
   manager: StashManager,
   args: Record<string, unknown> | undefined,
 ) {
+  const stashName = args?.stash as string;
   const path = args?.path as string;
-  if (!path) return errorResponse("path is required");
 
-  const parsed = parsePath(path);
-  if (!parsed) return errorResponse("Invalid path format");
+  if (!stashName || !path) {
+    return errorResponse("stash and path are required");
+  }
 
-  const stash = manager.get(parsed.stash);
-  if (!stash) return errorResponse(`Stash not found: ${parsed.stash}`);
+  const stash = manager.get(stashName);
+  if (!stash) return errorResponse(`Stash not found: ${stashName}`);
 
   try {
-    const content = stash.read(parsed.filePath);
+    const content = stash.read(path);
     return jsonResponse({ content });
   } catch (err) {
-    return errorResponse(`File not found: ${parsed.filePath}`);
+    return errorResponse(`File not found: ${path}`);
   }
 }
 
@@ -228,28 +210,28 @@ function handleWrite(
   manager: StashManager,
   args: Record<string, unknown> | undefined,
 ) {
+  const stashName = args?.stash as string;
   const path = args?.path as string;
   const content = args?.content as string | undefined;
   const patch = args?.patch as
     | { start: number; end: number; text: string }
     | undefined;
 
-  if (!path) return errorResponse("path is required");
+  if (!stashName || !path) {
+    return errorResponse("stash and path are required");
+  }
   if (content === undefined && !patch) {
     return errorResponse("Must provide content or patch");
   }
 
-  const parsed = parsePath(path);
-  if (!parsed) return errorResponse("Invalid path format");
-
-  const stash = manager.get(parsed.stash);
-  if (!stash) return errorResponse(`Stash not found: ${parsed.stash}`);
+  const stash = manager.get(stashName);
+  if (!stash) return errorResponse(`Stash not found: ${stashName}`);
 
   try {
     if (patch) {
-      stash.patch(parsed.filePath, patch.start, patch.end, patch.text);
+      stash.patch(path, patch.start, patch.end, patch.text);
     } else {
-      stash.write(parsed.filePath, content!);
+      stash.write(path, content!);
     }
     return jsonResponse({ success: true });
   } catch (err) {
@@ -261,17 +243,18 @@ function handleDelete(
   manager: StashManager,
   args: Record<string, unknown> | undefined,
 ) {
+  const stashName = args?.stash as string;
   const path = args?.path as string;
-  if (!path) return errorResponse("path is required");
 
-  const parsed = parsePath(path);
-  if (!parsed) return errorResponse("Invalid path format");
+  if (!stashName || !path) {
+    return errorResponse("stash and path are required");
+  }
 
-  const stash = manager.get(parsed.stash);
-  if (!stash) return errorResponse(`Stash not found: ${parsed.stash}`);
+  const stash = manager.get(stashName);
+  if (!stash) return errorResponse(`Stash not found: ${stashName}`);
 
   try {
-    stash.delete(parsed.filePath);
+    stash.delete(path);
     return jsonResponse({ success: true });
   } catch (err) {
     return errorResponse((err as Error).message);
@@ -282,24 +265,19 @@ function handleMove(
   manager: StashManager,
   args: Record<string, unknown> | undefined,
 ) {
+  const stashName = args?.stash as string;
   const from = args?.from as string;
   const to = args?.to as string;
 
-  if (!from || !to) return errorResponse("from and to are required");
-
-  const parsedFrom = parsePath(from);
-  const parsedTo = parsePath(to);
-  if (!parsedFrom || !parsedTo) return errorResponse("Invalid path format");
-
-  if (parsedFrom.stash !== parsedTo.stash) {
-    return errorResponse("Cross-stash moves not supported");
+  if (!stashName || !from || !to) {
+    return errorResponse("stash, from, and to are required");
   }
 
-  const stash = manager.get(parsedFrom.stash);
-  if (!stash) return errorResponse(`Stash not found: ${parsedFrom.stash}`);
+  const stash = manager.get(stashName);
+  if (!stash) return errorResponse(`Stash not found: ${stashName}`);
 
   try {
-    stash.move(parsedFrom.filePath, parsedTo.filePath);
+    stash.move(from, to);
     return jsonResponse({ success: true });
   } catch (err) {
     return errorResponse((err as Error).message);

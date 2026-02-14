@@ -2,12 +2,8 @@ import { StashManager } from "../../core/manager.js";
 import { getGitHubToken } from "../../core/config.js";
 import { GitHubProvider } from "../../providers/github.js";
 
-export async function joinStash(
-  key: string,
-  localName: string,
-  baseDir?: string,
-): Promise<void> {
-  const manager = await StashManager.load(baseDir);
+export async function joinStash(key: string, localName: string): Promise<void> {
+  const manager = await StashManager.load();
 
   const [providerType, ...rest] = key.split(":");
   const providerKey = rest.join(":");
@@ -17,7 +13,7 @@ export async function joinStash(
     process.exit(1);
   }
 
-  const token = await getGitHubToken(baseDir);
+  const token = await getGitHubToken();
   if (!token) {
     console.error("No GitHub token found. Run `stash auth github` first.");
     process.exit(1);

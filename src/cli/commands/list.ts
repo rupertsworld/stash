@@ -1,7 +1,7 @@
 import { StashManager } from "../../core/manager.js";
 
-export async function listStashes(baseDir?: string): Promise<void> {
-  const manager = await StashManager.load(baseDir);
+export async function listStashes(): Promise<void> {
+  const manager = await StashManager.load();
   const stashes = manager.list();
 
   if (stashes.length === 0) {

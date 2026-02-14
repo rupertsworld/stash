@@ -1,11 +1,8 @@
 import { StashManager } from "../../core/manager.js";
 import { confirm } from "../prompts.js";
 
-export async function deleteStash(
-  name: string,
-  baseDir?: string,
-): Promise<void> {
-  const manager = await StashManager.load(baseDir);
+export async function deleteStash(name: string): Promise<void> {
+  const manager = await StashManager.load();
   const stash = manager.get(name);
 
   if (!stash) {

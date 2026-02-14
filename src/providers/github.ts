@@ -26,6 +26,59 @@ export class GitHubProvider implements SyncProvider {
     this.branch = branch;
   }
 
+  async create(): Promise<void> {
+    // Check if user is the owner (personal repo) or org
+    const { data: user } = await this.octokit.rest.users.getAuthenticated();
+
+    if (user.login === this.owner) {
+      // Personal repo
+      await this.octokit.rest.repos.createForAuthenticatedUser({
+        name: this.repo,
+        private: true,
+        auto_init: false,
+      });
+    } else {
+      // Org repo
+      await this.octokit.rest.repos.createInOrg({
+        org: this.owner,
+        name: this.repo,
+        private: true,
+        auto_init: false,
+      });
+    }
+
+    // Create initial commit with .stash placeholder
+    // (Git API requires at least one commit before we can use blobs/trees)
+    await this.octokit.rest.repos.createOrUpdateFileContents({
+      owner: this.owner,
+      repo: this.repo,
+      path: ".stash/.gitkeep",
+      message: "Initialize stash",
+      content: Buffer.from("").toString("base64"),
+    });
+  }
+
+  async exists(): Promise<boolean> {
+    try {
+      await this.octokit.rest.repos.get({
+        owner: this.owner,
+        repo: this.repo,
+      });
+      return true;
+    } catch (err) {
+      const error = err as Error & { status?: number };
+      if (error.status === 404) return false;
+      throw err;
+    }
+  }
+
+  async delete(): Promise<void> {
+    await this.octokit.rest.repos.delete({
+      owner: this.owner,
+      repo: this.repo,
+    });
+  }
+
   async sync(
     localDocs: Map<string, Uint8Array>,
   ): Promise<Map<string, Uint8Array>> {
@@ -107,6 +160,9 @@ export class GitHubProvider implements SyncProvider {
   }
 
   private async push(docs: Map<string, Uint8Array>): Promise<void> {
+    // Nothing to push if no docs
+    if (docs.size === 0) return;
+
     // Build tree entries for .stash/ files
     const treeEntries: TreeEntry[] = [];
 

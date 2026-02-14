@@ -15,6 +15,9 @@ export async function startDaemon(baseDir?: string): Promise<void> {
 
   // MCP endpoint
   app.post("/mcp", async (req, res) => {
+    // Reload to pick up external changes (CLI creates/deletes)
+    await manager.reload();
+
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined, // Stateless
     });

@@ -222,6 +222,15 @@ interface SyncProvider {
    * @throws SyncError on network/auth failures (caller handles retry)
    */
   sync(docs: Map<string, Uint8Array>): Promise<Map<string, Uint8Array>>;
+
+  /** Check if remote storage exists */
+  exists(): Promise<boolean>;
+
+  /** Create remote storage (e.g., GitHub repo) */
+  create(): Promise<void>;
+
+  /** Delete remote storage */
+  delete(): Promise<void>;
 }
 ```
 
@@ -546,22 +555,23 @@ main();
 
 ## MCP Tools
 
-Path format: `<stash>:<filepath>` or just `<stash>:` for root.
+Tools use separate `stash` and `path` parameters.
 
 ### stash_list
 
 List stashes or immediate children within a path.
 
 **Arguments:**
-- `path` (optional): Empty = list stashes. `"stash:"` = list root. `"stash:dir/"` = list in dir.
+- `stash` (optional): Stash name. Omit to list all stashes.
+- `path` (optional): Directory path within stash.
 
 **Returns:** `{ items: string[] }` - directories have trailing `/`
 
 **Example:**
 ```
 stash_list({}) → { items: ["my-project", "research"] }
-stash_list({ path: "my-project:" }) → { items: ["readme.md", "docs/"] }
-stash_list({ path: "my-project:docs/" }) → { items: ["guide.md", "api/"] }
+stash_list({ stash: "my-project" }) → { items: ["readme.md", "docs/"] }
+stash_list({ stash: "my-project", path: "docs/" }) → { items: ["guide.md", "api/"] }
 ```
 
 ### stash_glob
@@ -588,7 +598,8 @@ stash_glob({ stash: "my-project", pattern: "docs/*.md" }) → { files: ["docs/gu
 Read file content.
 
 **Arguments:**
-- `path`: `"stash-name:filepath"`
+- `stash`: Stash name
+- `path`: File path within stash
 
 **Returns:** `{ content: string }`
 
@@ -601,7 +612,8 @@ Read file content.
 Write or update a file. Creates the file if it doesn't exist. Parent directories are implicit.
 
 **Arguments:**
-- `path`: `"stash-name:filepath"`
+- `stash`: Stash name
+- `path`: File path within stash
 - `content` (optional): Full content replacement (creates file if new)
 - `patch` (optional): `{ start: number, end: number, text: string }` (file must exist)
 
@@ -621,7 +633,8 @@ Must provide either `content` or `patch`.
 Delete a file.
 
 **Arguments:**
-- `path`: `"stash-name:filepath"`
+- `stash`: Stash name
+- `path`: File path within stash
 
 **Returns:** `{ success: true }`
 
@@ -634,17 +647,17 @@ Delete a file.
 Move or rename a file within a stash.
 
 **Arguments:**
-- `from`: `"stash-name:filepath"`
-- `to`: `"stash-name:filepath"` (must be same stash)
+- `stash`: Stash name
+- `from`: Source file path
+- `to`: Destination file path
 
 **Returns:** `{ success: true }`
 
 **Errors:**
 - Source not found: `{ error: "File not found: <path>" }`
 - Stash not found: `{ error: "Stash not found: <name>" }`
-- Cross-stash move: `{ error: "Cross-stash moves not supported" }`
 
-**Note:** Moving preserves the file's document identity (`docId`), so edit history is maintained. For cross-stash moves, use read + write + delete instead.
+**Note:** Moving preserves the file's document identity (`docId`), so edit history is maintained.
 
 ## Module Structure
 

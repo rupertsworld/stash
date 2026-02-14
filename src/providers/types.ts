@@ -15,4 +15,19 @@ export interface SyncProvider {
    * @throws SyncError on network/auth failures (caller handles retry)
    */
   sync(docs: Map<string, Uint8Array>): Promise<Map<string, Uint8Array>>;
+
+  /**
+   * Check if remote storage exists.
+   */
+  exists(): Promise<boolean>;
+
+  /**
+   * Create remote storage.
+   */
+  create(): Promise<void>;
+
+  /**
+   * Delete remote storage.
+   */
+  delete(): Promise<void>;
 }

@@ -3,11 +3,8 @@ import { getGitHubToken } from "../../core/config.js";
 import { GitHubProvider } from "../../providers/github.js";
 import { promptChoice, prompt } from "../prompts.js";
 
-export async function createStash(
-  name: string,
-  baseDir?: string,
-): Promise<void> {
-  const manager = await StashManager.load(baseDir);
+export async function createStash(name: string): Promise<void> {
+  const manager = await StashManager.load();
 
   const providerChoice = await promptChoice("Sync provider?", [
     "None",
@@ -19,7 +16,7 @@ export async function createStash(
   let key: string | null = null;
 
   if (providerChoice === "GitHub") {
-    const token = await getGitHubToken(baseDir);
+    const token = await getGitHubToken();
     if (!token) {
       console.error(
         "No GitHub token found. Run `stash auth github` first.",
@@ -35,6 +32,19 @@ export async function createStash(
 
     const [owner, repo] = repoName.split("/");
     provider = new GitHubProvider(token, owner, repo);
+
+    // Create remote if it doesn't exist
+    const remoteExists = await provider.exists();
+    if (!remoteExists) {
+      console.log(`Creating ${repoName}...`);
+      try {
+        await provider.create();
+      } catch (err) {
+        console.error(`Failed to create remote: ${(err as Error).message}`);
+        process.exit(1);
+      }
+    }
+
     providerType = "github";
     key = `github:${repoName}`;
   }
