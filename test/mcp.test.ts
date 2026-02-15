@@ -61,7 +61,7 @@ describe("MCP Server", () => {
 
     const result = await client.callTool({
       name: "stash_list",
-      arguments: { path: "test:" },
+      arguments: { stash: "test" },
     });
     const data = JSON.parse((result.content as any)[0].text);
     expect(data.items).toContain("readme.md");
@@ -76,7 +76,7 @@ describe("MCP Server", () => {
 
     const result = await client.callTool({
       name: "stash_list",
-      arguments: { path: "test:docs/" },
+      arguments: { stash: "test", path: "docs/" },
     });
     const data = JSON.parse((result.content as any)[0].text);
     expect(data.items).toContain("a.md");

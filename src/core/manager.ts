@@ -87,7 +87,7 @@ export class StashManager {
     return stash;
   }
 
-  async join(
+  async connect(
     key: string,
     localName: string,
     provider: SyncProvider,

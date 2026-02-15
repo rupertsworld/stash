@@ -2,7 +2,7 @@ import { StashManager } from "../../core/manager.js";
 import { getGitHubToken } from "../../core/config.js";
 import { GitHubProvider } from "../../providers/github.js";
 
-export async function joinStash(key: string, localName: string): Promise<void> {
+export async function connectStash(key: string, localName: string): Promise<void> {
   const manager = await StashManager.load();
 
   const [providerType, ...rest] = key.split(":");
@@ -28,8 +28,8 @@ export async function joinStash(key: string, localName: string): Promise<void> {
   const provider = new GitHubProvider(token, owner, repo);
 
   try {
-    await manager.join(key, localName, provider);
-    console.log(`Joined stash "${localName}" from ${key}`);
+    await manager.connect(key, localName, provider);
+    console.log(`Connected stash "${localName}" from ${key}`);
   } catch (err) {
     console.error((err as Error).message);
     process.exit(1);

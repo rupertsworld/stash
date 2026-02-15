@@ -3,7 +3,7 @@
 import { Command } from "commander";
 import { authGitHub } from "./cli/commands/auth.js";
 import { createStash } from "./cli/commands/create.js";
-import { joinStash } from "./cli/commands/join.js";
+import { connectStash } from "./cli/commands/connect.js";
 import { listStashes } from "./cli/commands/list.js";
 import { deleteStash } from "./cli/commands/delete.js";
 import { syncStashes } from "./cli/commands/sync.js";
@@ -33,10 +33,10 @@ program
   .action(createStash);
 
 program
-  .command("join <key>")
-  .description("Join an existing remote stash")
+  .command("connect <key>")
+  .description("Connect to an existing remote stash")
   .requiredOption("--name <name>", "Local name for the stash")
-  .action((key, opts) => joinStash(key, opts.name));
+  .action((key, opts) => connectStash(key, opts.name));
 
 program
   .command("list")

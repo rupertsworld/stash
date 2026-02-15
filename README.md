@@ -1,148 +1,82 @@
 # Stash
 
-A local-first collaborative folder service with MCP interface for AI agents and humans. Stash lets you create synced folders that multiple AI agents and humans can collaborate on, with automatic conflict resolution powered by Automerge CRDTs.
+Conflict-free synced folders for humans and agents. Multiple editors can read and write to the same files simultaneously & changes merge automatically.
 
-## Features
+## The Problem
 
-- **Local-first**: Files are stored locally and always available offline
-- **Conflict-free sync**: Uses Automerge CRDTs to automatically merge concurrent edits
-- **MCP interface**: AI agents can read and write files via the Model Context Protocol
-- **GitHub sync**: Optionally sync stashes to GitHub repositories
-- **CLI management**: Create, join, and manage stashes from the command line
+When multiple people or agents work on shared files:
 
-## Installation
+- **Git** requires manual conflict resolution and pull/push workflows
+- **SyncThing** (and other solutions) can conflict
+- **No good solution** for concurrent editing across humans and agents
 
-```bash
-npm install
-npm run build
-npm link  # Optional: makes 'stash' available globally
-```
+## How Stash Solves It
+
+Stash uses CRDTs (Automerge) to automatically merge edits—no conflicts, no manual intervention. Changes sync in the background to GitHub (or other providers in future).
+
+- **Conflict-free**: Concurrent edits merge automatically
+- **Auto-sync**: No pull/push, changes sync in background
+- **MCP tools**: Agents read/write via Model Context Protocol
+- **Local-first**: Always available offline, syncs when connected
 
 ## Quick Start
 
-### Create a local stash
-
 ```bash
-stash create my-notes
-```
+npm install && npm run build
+npm link  # makes 'stash' available globally
 
-### Create a synced stash (with GitHub)
+# Create a synced stash
+stash auth github           # configure GitHub token
+stash create my-stash       # select "github" when prompted
 
-```bash
-# First, configure your GitHub token
-stash auth github
-
-# Create a stash synced to GitHub
-stash create my-project
-# Select "github" when prompted, then enter your repo name (e.g., username/my-stash)
-```
-
-### Join an existing stash
-
-```bash
-stash join github:username/repo-name --name local-name
-```
-
-### Start the daemon
-
-```bash
+# Start background sync
 stash start
 ```
 
-The daemon watches for local changes and syncs automatically.
-
 ## CLI Commands
 
-| Command | Description |
-|---------|-------------|
-| `stash create <name>` | Create a new stash |
-| `stash join <key> --name <name>` | Join an existing stash by its sync key |
-| `stash list` | List all local stashes |
-| `stash delete <name>` | Delete a local stash |
-| `stash sync <name>` | Manually sync a stash |
-| `stash start` | Start the background daemon |
-| `stash stop` | Stop the background daemon |
-| `stash status` | Show daemon status |
-| `stash auth github` | Configure GitHub personal access token |
-| `stash install` | Install MCP server for AI assistants |
-
-## MCP Server
-
-Stash includes an MCP server that AI agents can use to interact with stashes:
-
-| Tool | Description |
-|------|-------------|
-| `stash_list` | List stashes or files within a stash |
-| `stash_glob` | Find files matching a glob pattern |
-| `stash_read` | Read file content |
-| `stash_write` | Write or patch file content |
-| `stash_delete` | Delete a file |
-| `stash_move` | Move or rename a file |
-
-### Tool parameters
-
-Most tools use separate `stash` and `path` parameters:
-
 ```
-stash_list({})                                    # List all stashes
-stash_list({ path: "my-stash:" })                 # List files in stash root
-stash_read({ stash: "my-stash", path: "todo.md" }) # Read a file
-stash_write({ stash: "my-stash", path: "todo.md", content: "..." })
-stash_delete({ stash: "my-stash", path: "old.md" })
-stash_move({ stash: "my-stash", from: "old.md", to: "new.md" })
+stash create <name>     Create a new stash
+stash connect <key>     Connect to an existing stash (e.g., github:user/repo)
+stash list              List all stashes
+stash delete <name>     Delete a stash
+stash start             Start background daemon
+stash stop              Stop daemon
+stash auth github       Configure GitHub token
+stash install           Show MCP server config
 ```
 
-MCP tools operate on local state for fast response. The daemon handles syncing in the background.
+## MCP Tools
 
-### Installing the MCP server
-
-For Claude Code:
-
+Add to Claude Code:
 ```bash
 claude mcp add stash node /path/to/stash/dist/mcp-server.js
 ```
 
-Or run `stash install` to see the configuration for other MCP clients.
+Available tools:
 
-#### Manual configuration (Claude Desktop)
+| Tool | Description |
+|------|-------------|
+| `stash_list` | List stashes or files in a directory |
+| `stash_glob` | Find files matching a pattern |
+| `stash_read` | Read file content |
+| `stash_write` | Write or patch a file |
+| `stash_delete` | Delete a file |
+| `stash_move` | Move/rename a file |
 
-Add to your Claude Desktop config (`~/Library/Application Support/Claude/claude_desktop_config.json`):
-
-```json
-{
-  "mcpServers": {
-    "stash": {
-      "command": "node",
-      "args": ["/path/to/stash/dist/mcp-server.js"]
-    }
-  }
-}
+Example usage:
 ```
-
-## How It Works
-
-1. **Local storage**: Each stash is a folder containing Automerge binary state in `~/.stash/<name>/`
-2. **CRDT sync**: File changes are tracked as Automerge operations, enabling automatic conflict resolution
-3. **GitHub backend**: Synced stashes push Automerge state to `.stash/docs/` and readable files to the repo root
-4. **Daemon**: Watches for local changes and syncs automatically (also syncs every 30s as fallback)
-
-## Development
-
-```bash
-# Build
-npm run build
-
-# Watch mode
-npm run dev
-
-# Run tests
-npm test
+stash_list({})                                       // list all stashes
+stash_list({ stash: "notes" })                       // list files in stash root
+stash_list({ stash: "notes", path: "subdir/" })      // list files in subdir
+stash_read({ stash: "notes", path: "todo.md" })      // read a file
+stash_write({ stash: "notes", path: "todo.md", content: "..." })
 ```
 
 ## Requirements
 
 - Node.js 18+
-- GitHub personal access token (for GitHub sync, requires `repo` scope)
+- GitHub token with `repo` scope (for GitHub sync)
 
 ## License
 

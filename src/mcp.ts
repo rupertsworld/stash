@@ -16,14 +16,14 @@ export function createMcpServer(manager: StashManager): Server {
       {
         name: "stash_list",
         description:
-          "List stashes or immediate children within a path. No path = list stashes. 'stash:' = list root. 'stash:dir/' = list in dir.",
+          "List stashes or files within a stash. No stash = list all stashes. With stash = list files at path (or root if no path).",
         inputSchema: {
           type: "object" as const,
           properties: {
+            stash: { type: "string", description: "Stash name" },
             path: {
               type: "string",
-              description:
-                'Empty = list stashes. "stash:" = list root. "stash:dir/" = list in dir.',
+              description: "Directory path within stash (defaults to root)",
             },
           },
         },
@@ -150,33 +150,22 @@ function jsonResponse(data: unknown) {
   };
 }
 
-function parsePath(path: string): { stash: string; filePath: string } | null {
-  const colonIndex = path.indexOf(":");
-  if (colonIndex === -1) return null;
-  return {
-    stash: path.slice(0, colonIndex),
-    filePath: path.slice(colonIndex + 1),
-  };
-}
-
 function handleList(
   manager: StashManager,
   args: Record<string, unknown> | undefined,
 ) {
+  const stashName = args?.stash as string | undefined;
   const path = args?.path as string | undefined;
 
-  if (!path) {
+  if (!stashName) {
     // List stashes
     return jsonResponse({ items: manager.list() });
   }
 
-  const parsed = parsePath(path);
-  if (!parsed) return errorResponse(`Invalid path format: ${path}`);
+  const stash = manager.get(stashName);
+  if (!stash) return errorResponse(`Stash not found: ${stashName}`);
 
-  const stash = manager.get(parsed.stash);
-  if (!stash) return errorResponse(`Stash not found: ${parsed.stash}`);
-
-  const items = stash.list(parsed.filePath || undefined);
+  const items = stash.list(path || undefined);
   return jsonResponse({ items });
 }
 
