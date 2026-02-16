@@ -4,19 +4,27 @@
 
 **File**: `src/core/stash.ts`
 
-The `dirty` flag is set to `true` in `scheduleBackgroundSave()` but only cleared inside the sync `.then()` callback. If there's no provider, `sync()` returns immediately without clearing it.
+The `dirty` flag is set to `true` in `scheduleBackgroundSave()` but only cleared inside the sync `.then()` callback. If there's no provider, `sync()` returns immediately without clearing it, so `isDirty()` is permanently `true`.
 
-**Fix**: Clear `dirty` after save completes, not after sync. The flag should mean "has unsaved changes", not "has unsynced changes". Move `this.dirty = false` into the save chain:
+**Fix**: The flag should mean "has unsaved changes". Use a generation counter so a save only clears the flag if no new writes arrived since that save was scheduled:
 
 ```typescript
+private dirty = false;
+private saveGeneration = 0;
+
 private scheduleBackgroundSave(): void {
   this.dirty = true;
+  this.saveGeneration++;
 
+  const generationAtSchedule = this.saveGeneration;
   const previousSave = this.savePromise ?? Promise.resolve();
   this.savePromise = previousSave.then(() =>
     this.save()
       .then(() => {
-        this.dirty = false;
+        // Only clear if no new writes arrived since this save was scheduled
+        if (this.saveGeneration === generationAtSchedule) {
+          this.dirty = false;
+        }
       })
       .catch((err) => {
         console.error(`Save failed for ${this.name}:`, (err as Error).message);
@@ -36,39 +44,40 @@ private scheduleBackgroundSave(): void {
 }
 ```
 
+Without the counter, a naive "clear dirty after save" has a race: writes A and B fire quickly, save-A completes and clears dirty before save-B has finished.
+
 ---
 
 ## 2. `manager.reload()` on every MCP request
 
-**File**: `src/mcp.ts`
+**File**: `src/mcp.ts`, `src/core/manager.ts`
 
-Every tool call deserializes all stashes from disk. This is expensive and unnecessary -- the in-memory state is already up to date for changes made through the MCP server itself. The reload is only needed to pick up changes made by *other* processes (CLI, daemon file watcher).
+Every tool call runs `manager.reload()`, which re-reads meta.json and deserializes every Automerge document for every stash. This is O(stashes * files) on every request, including reads.
 
-**Fix**: Replace the full reload with a lightweight staleness check. Add a `lastLoadTime` to `StashManager` and only reload if the base directory's mtime has changed:
+The reload exists to pick up changes made by external processes (CLI, daemon). But it's far too aggressive.
 
-In `src/core/manager.ts`, add:
+**Fix**: Throttle reloads by time. Add `reloadIfStale()` that skips the reload if one happened recently:
 
 ```typescript
-private lastLoadTime: number = 0;
+// src/core/manager.ts
+private lastReloadMs = 0;
+private static RELOAD_INTERVAL_MS = 2000;
 
-async reloadIfChanged(): Promise<void> {
-  try {
-    const stat = await fs.stat(this.baseDir);
-    if (stat.mtimeMs > this.lastLoadTime) {
-      await this.reload();
-      this.lastLoadTime = Date.now();
-    }
-  } catch {
-    // Base dir doesn't exist, nothing to reload
-  }
+async reloadIfStale(): Promise<void> {
+  const now = Date.now();
+  if (now - this.lastReloadMs < StashManager.RELOAD_INTERVAL_MS) return;
+  this.lastReloadMs = now;
+  await this.reload();
 }
 ```
 
-Set `this.lastLoadTime = Date.now()` at the end of `StashManager.load()`.
+Set `this.lastReloadMs = Date.now()` at the end of `StashManager.load()`.
 
-In `src/mcp.ts`, change `await manager.reload()` to `await manager.reloadIfChanged()`.
+In `src/mcp.ts`, change `await manager.reload()` to `await manager.reloadIfStale()`.
 
-This reduces the common case (no external changes) to a single `fs.stat` call.
+This caps reloads to at most once per 2 seconds regardless of request rate. In the common case (rapid tool calls from an agent), most requests skip the reload entirely.
+
+Note: a filesystem-mtime approach (check if `baseDir` changed) doesn't work here because directory mtime only updates when immediate children are added/removed, not when files inside stash subdirectories change.
 
 ---
 
@@ -76,59 +85,64 @@ This reduces the common case (no external changes) to a single `fs.stat` call.
 
 **Files**: `src/providers/types.ts`, `src/providers/github.ts`, `src/core/stash.ts`
 
-The Automerge merge logic is inside `GitHubProvider.sync()`. Any new provider would have to duplicate it. The merge is a core concern, not a provider concern.
+The Automerge merge logic is inside `GitHubProvider.sync()`. Any new provider would have to duplicate it. Merging is a core CRDT concern, not a transport concern.
 
-**Fix**: Split the provider interface into `fetch` and `push`, and move merge into `Stash.doSync()`:
+**Fix**: Split the provider interface into `fetch` and `push`, move merge into `Stash.doSync()`:
 
 ```typescript
 // src/providers/types.ts
 export interface SyncProvider {
+  /** Fetch all documents from remote storage. */
   fetch(): Promise<Map<string, Uint8Array>>;
-  push(docs: Map<string, Uint8Array>, deletedPaths?: string[]): Promise<void>;
+
+  /** Push merged documents to remote storage. Provider handles rendering/cleanup internally. */
+  push(docs: Map<string, Uint8Array>): Promise<void>;
+
   exists(): Promise<boolean>;
   create(): Promise<void>;
   delete(): Promise<void>;
 }
 ```
 
-Then in `Stash.doSync()`, the flow becomes:
+Note: no `deletedPaths` parameter. Deletion of rendered plain-text files is a GitHub-specific concern -- `GitHubProvider.push()` should compute that internally by comparing the incoming structure doc against the current remote tree (which it already fetches during push via `getRef`/`getCommit`).
+
+Then `Stash.doSync()` becomes:
 
 ```typescript
 private async doSync(): Promise<void> {
   // 1. Pre-sync: create empty docs for dangling refs (unchanged)
-  // 2. Gather local docs (unchanged)
+  // 2. Gather local docs as Automerge binaries (unchanged)
 
   // 3. Fetch remote
   const remoteDocs = await withRetry(() => this.provider!.fetch());
 
-  // 4. Merge locally (moved from GitHubProvider)
+  // 4. Merge (now lives here, not in provider)
   const merged = new Map<string, Uint8Array>();
   for (const [docId, localData] of localDocs) {
-    let doc = Automerge.load<unknown>(localData);
     const remoteData = remoteDocs.get(docId);
     if (remoteData) {
+      const localDoc = Automerge.load<unknown>(localData);
       const remoteDoc = Automerge.load<unknown>(remoteData);
-      doc = Automerge.merge(doc, remoteDoc as typeof doc);
+      merged.set(docId, Automerge.save(Automerge.merge(localDoc, remoteDoc as typeof localDoc)));
+    } else {
+      merged.set(docId, localData);
     }
-    merged.set(docId, Automerge.save(doc));
   }
+  // Include remote-only docs
   for (const [docId, remoteData] of remoteDocs) {
     if (!localDocs.has(docId)) {
       merged.set(docId, remoteData);
     }
   }
 
-  // 5. Compute deleted paths
-  const deletedPaths = computeDeletedPaths(remoteDocs, merged);
+  // 5. Push
+  await withRetry(() => this.provider!.push(merged));
 
-  // 6. Push
-  await withRetry(() => this.provider!.push(merged, deletedPaths));
-
-  // 7. Load merged state + persist (unchanged)
+  // 6. Load merged state + persist (unchanged)
 }
 ```
 
-`GitHubProvider` simplifies to just `fetch()` (read from GitHub) and `push()` (write to GitHub). The `sync()` method is removed.
+`GitHubProvider` drops its `sync()` method and its Automerge import entirely. It becomes a pure transport: fetch bytes from GitHub, push bytes to GitHub.
 
 ---
 
@@ -136,16 +150,16 @@ private async doSync(): Promise<void> {
 
 **File**: `src/providers/github.ts`
 
-The `fetch()` method makes one API call per file doc. For N files, that's N+2 calls (structure + directory listing + N file fetches).
+The `fetch()` method makes one `getContent()` call per file doc, sequentially. For N files, that's N+2 sequential calls (structure + directory listing + N file fetches).
 
-**Fix**: Use the Git Trees API to fetch the entire `.stash/` tree in a single call, then fetch blobs in parallel:
+**Fix**: Use the Git Trees API to discover all `.stash/` blobs in one call, then fetch blobs in parallel:
 
 ```typescript
 private async fetch(): Promise<Map<string, Uint8Array>> {
   const docs = new Map<string, Uint8Array>();
 
   try {
-    // Get the current tree recursively (single API call)
+    // 1. Get current commit (2 sequential calls)
     const { data: ref } = await this.octokit.rest.git.getRef({
       owner: this.owner, repo: this.repo,
       ref: `heads/${this.branch}`,
@@ -154,13 +168,15 @@ private async fetch(): Promise<Map<string, Uint8Array>> {
       owner: this.owner, repo: this.repo,
       commit_sha: ref.object.sha,
     });
+
+    // 2. Get full tree in one call (returns SHA refs, not content)
     const { data: tree } = await this.octokit.rest.git.getTree({
       owner: this.owner, repo: this.repo,
       tree_sha: commit.tree.sha,
       recursive: "true",
     });
 
-    // Find all .automerge blobs in .stash/
+    // 3. Fetch all .automerge blobs in parallel
     const blobFetches: Promise<void>[] = [];
     for (const item of tree.tree) {
       if (!item.path?.startsWith(".stash/") || !item.path.endsWith(".automerge")) continue;
@@ -178,7 +194,6 @@ private async fetch(): Promise<Map<string, Uint8Array>> {
         })
       );
     }
-
     await Promise.all(blobFetches);
   } catch (err) {
     const error = err as Error & { status?: number };
@@ -190,7 +205,7 @@ private async fetch(): Promise<Map<string, Uint8Array>> {
 }
 ```
 
-This reduces N+2 sequential calls to 3 sequential + N parallel (tree fetch + parallel blob fetches). For most repos, blobs under 100KB are already included inline in the tree response, potentially reducing to a single call.
+This reduces N+2 sequential calls to 3 sequential + N parallel. The tree call discovers all blob SHAs without listing directories, and blob fetches run concurrently.
 
 ---
 
@@ -198,9 +213,9 @@ This reduces N+2 sequential calls to 3 sequential + N parallel (tree fetch + par
 
 **File**: `src/core/file.ts`
 
-`setContent` calls `d.content.deleteAt(0, len)` then `d.content.insertAt(0, ...content.split(""))`, which spreads every character as a separate argument. This creates a huge Automerge operation list and is very slow for large files.
+`setContent` calls `d.content.deleteAt(0, len)` then `d.content.insertAt(0, ...content.split(""))`, spreading every character as a separate argument. For a 10KB file, that's 10,000 individual Automerge operations in a single change, inflating document history.
 
-**Fix**: Use Automerge's `splice` method (available in Automerge 2.x) instead of character-by-character operations:
+**Fix**: Use `Automerge.splice` (available in Automerge 2.x), which handles text efficiently as a batch:
 
 ```typescript
 export function setContent(
@@ -224,23 +239,38 @@ export function applyPatch(
 }
 ```
 
-`Automerge.splice` operates on the text efficiently at the CRDT level without spreading into individual characters.
+**Migration concern**: `Automerge.splice` works with Automerge's native string type, not the deprecated `Automerge.Text` class. Changing `FileDoc.content` from `Automerge.Text` to `string` is a breaking change for existing `.automerge` files on disk.
 
-**Note**: This also requires switching from `new Automerge.Text(content)` to a plain string in `createFileDoc`, since `Automerge.splice` works with Automerge's native string type rather than the deprecated `Text` class:
+Migration strategy -- convert on load in `Stash.load()`:
 
 ```typescript
-export function createFileDoc(
-  content: string = "",
-  actorId?: string,
-): Automerge.Doc<FileDoc> {
-  return Automerge.from<FileDoc>(
-    { content: content },
-    actorId ? { actor: actorId as Automerge.ActorId } : undefined,
-  );
+// After loading each FileDoc, migrate Text → string if needed
+for (const [docId, doc] of fileDocs) {
+  if (doc.content instanceof Automerge.Text) {
+    const text = doc.content.toString();
+    fileDocs.set(docId, createFileDoc(text, hexActorId));
+  }
 }
 ```
 
-The `FileDoc` interface would change `content` from `Automerge.Text` to `string`, and `getContent` would just return `doc.content` directly.
+Then update `createFileDoc` to use a plain string and update the `FileDoc` interface:
+
+```typescript
+export interface FileDoc {
+  content: string;
+}
+
+export function createFileDoc(content: string = "", actorId?: string): Automerge.Doc<FileDoc> {
+  return Automerge.from<FileDoc>(
+    { content },
+    actorId ? { actor: actorId as Automerge.ActorId } : undefined,
+  );
+}
+
+export function getContent(doc: Automerge.Doc<FileDoc>): string {
+  return doc.content;
+}
+```
 
 ---
 
@@ -248,9 +278,9 @@ The `FileDoc` interface would change `content` from `Automerge.Text` to `string`
 
 **File**: `src/daemon.ts`
 
-Each request calls `mcpServer.connect(transport)` on the same `Server` instance. Concurrent requests could interleave server state.
+Each `POST /mcp` calls `mcpServer.connect(transport)` on the same `Server` instance. The MCP SDK's `Server.connect()` replaces the active transport. If two requests arrive concurrently, the second `connect()` overwrites the first request's transport, corrupting both.
 
-**Fix**: Create a fresh MCP server per request, or use a request-scoped pattern:
+**Fix**: Create a fresh MCP server per request:
 
 ```typescript
 app.post("/mcp", async (req, res) => {
@@ -264,7 +294,7 @@ app.post("/mcp", async (req, res) => {
 });
 ```
 
-`createMcpServer` is cheap (it just registers handlers, no I/O), so creating one per request is fine. This ensures complete isolation between concurrent requests.
+`createMcpServer` is cheap -- it registers handler functions on a new Server object with no I/O. The shared `manager` instance provides the actual state. This gives complete isolation between concurrent requests.
 
 ---
 
@@ -272,32 +302,31 @@ app.post("/mcp", async (req, res) => {
 
 **File**: `src/cli/prompts.ts`
 
-**Fix**: Use Node's readline with output muted. Replace the current `promptSecret`:
+`promptSecret` falls through to `prompt()`. GitHub tokens are visible on screen.
+
+**Fix**: Use a custom writable stream that discards output, so readline doesn't echo keystrokes:
 
 ```typescript
+import { createInterface } from "node:readline/promises";
+import { Writable } from "node:stream";
+
 export async function promptSecret(question: string): Promise<string> {
+  process.stdout.write(question);
   const rl = createInterface({
     input: process.stdin,
-    output: process.stdout,
+    output: new Writable({ write: (_chunk, _enc, cb) => cb() }),
+    terminal: true,
   });
-
-  // Mute output after the question is printed
-  process.stdout.write(question);
-  const origWrite = process.stdout.write.bind(process.stdout);
-  process.stdout.write = () => true;
-
   try {
-    const answer = await rl.question("");
-    return answer;
+    return await rl.question("");
   } finally {
-    process.stdout.write = origWrite;
-    process.stdout.write("\n");
     rl.close();
+    process.stdout.write("\n");
   }
 }
 ```
 
-Alternatively, add a dependency on a small library like `read` that handles masked input properly. But the above works with zero dependencies.
+Setting `terminal: true` ensures readline still processes backspace/delete correctly. The null writable suppresses echo without monkeypatching `process.stdout.write`.
 
 ---
 
@@ -305,24 +334,25 @@ Alternatively, add a dependency on a small library like `read` that handles mask
 
 **File**: `src/cli/commands/stop.ts`
 
-**Fix**: Write a PID file when the daemon starts, read it on stop.
+Uses `lsof -ti :32847` to find the daemon PID. This is Linux/macOS-specific and won't work on Windows.
+
+**Fix**: Use a PID file. Use synchronous fs calls in signal handlers since the process is exiting immediately and async work may not complete before `process.exit`.
 
 In `src/daemon.ts`:
 
 ```typescript
-import { DEFAULT_STASH_DIR } from "./core/config.js";
-
-const PID_FILE = path.join(DEFAULT_STASH_DIR, "daemon.pid");
-
 export async function startDaemon(baseDir: string = DEFAULT_STASH_DIR): Promise<void> {
   // ... existing setup ...
 
-  await fs.promises.writeFile(PID_FILE, String(process.pid));
+  const pidFile = path.join(baseDir, "daemon.pid");
+  fs.writeFileSync(pidFile, String(process.pid));
 
-  process.on("SIGTERM", async () => {
-    try { await fs.promises.unlink(PID_FILE); } catch {}
+  const cleanup = () => {
+    try { fs.unlinkSync(pidFile); } catch {}
     process.exit(0);
-  });
+  };
+  process.on("SIGTERM", cleanup);
+  process.on("SIGINT", cleanup);
 
   // ... rest of startup ...
 }
@@ -331,19 +361,36 @@ export async function startDaemon(baseDir: string = DEFAULT_STASH_DIR): Promise<
 In `src/cli/commands/stop.ts`:
 
 ```typescript
+import * as fs from "node:fs/promises";
+import * as path from "node:path";
+import { DEFAULT_STASH_DIR } from "../../core/config.js";
+
 export async function stopDaemon(): Promise<void> {
   const pidFile = path.join(DEFAULT_STASH_DIR, "daemon.pid");
+
+  let pid: number;
   try {
-    const pid = parseInt(await fs.readFile(pidFile, "utf-8"), 10);
-    process.kill(pid, "SIGTERM");
-    console.log("Daemon stopped.");
+    pid = parseInt(await fs.readFile(pidFile, "utf-8"), 10);
   } catch {
     console.log("Daemon is not running.");
+    return;
   }
+
+  // Verify process is actually alive (handles stale PID files from crashes)
+  try {
+    process.kill(pid, 0); // signal 0 = existence check, doesn't actually kill
+  } catch {
+    await fs.unlink(pidFile).catch(() => {});
+    console.log("Daemon is not running (cleaned up stale PID file).");
+    return;
+  }
+
+  process.kill(pid, "SIGTERM");
+  console.log("Daemon stopped.");
 }
 ```
 
-This is cross-platform and doesn't depend on `lsof`.
+The `kill(pid, 0)` check detects stale PID files left by crashes without accidentally killing an unrelated process.
 
 ---
 
@@ -351,7 +398,9 @@ This is cross-platform and doesn't depend on `lsof`.
 
 **File**: `src/core/manager.ts` (in `create` and `connect`)
 
-**Fix**: Add a validation function and call it before creating or connecting:
+Names like `../etc` or names with path separators could cause directory traversal since the name is used directly in `path.join(baseDir, name)`.
+
+**Fix**: Add a validation function and call it at the top of `create()` and `connect()`:
 
 ```typescript
 const VALID_NAME = /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/;
@@ -362,16 +411,14 @@ function validateStashName(name: string): void {
   }
   if (!VALID_NAME.test(name)) {
     throw new Error(
-      "Stash name must start with alphanumeric and contain only letters, numbers, dots, hyphens, underscores"
+      "Stash name must start with a letter or number and contain only "
+      + "letters, numbers, dots, hyphens, or underscores"
     );
-  }
-  if (name === "." || name === ".." || name.includes("/") || name.includes("\\")) {
-    throw new Error("Invalid stash name");
   }
 }
 ```
 
-Call `validateStashName(name)` at the top of `create()` and `connect()`.
+The regex already rejects `.`, `..`, `/`, `\`, leading hyphens/dots, and empty strings, so no secondary checks are needed.
 
 ---
 
@@ -379,7 +426,9 @@ Call `validateStashName(name)` at the top of `create()` and `connect()`.
 
 **File**: `src/core/config.ts`
 
-**Fix**: Set restrictive file permissions when writing the config:
+`config.json` containing the GitHub token is written with default umask, potentially readable by other users.
+
+**Fix**: Set restrictive permissions:
 
 ```typescript
 export async function writeConfig(
@@ -392,7 +441,7 @@ export async function writeConfig(
 }
 ```
 
-`0o700` on the directory and `0o600` on the file ensures only the owning user can read or write the config.
+`0o700` on the directory and `0o600` on the file ensures only the owning user can access the config. On Windows these flags are ignored, but Windows has different permission semantics.
 
 ---
 
@@ -400,10 +449,10 @@ export async function writeConfig(
 
 **File**: `package.json`
 
-**Fix**: Remove it:
+`inquirer` (9.3.7) is listed as a dependency but never imported. The CLI uses custom prompts built on `readline/promises` in `src/cli/prompts.ts`.
+
+**Fix**:
 
 ```bash
 npm uninstall inquirer
 ```
-
-The CLI uses custom prompts in `src/cli/prompts.ts` built on `readline/promises`. `inquirer` is never imported anywhere.
