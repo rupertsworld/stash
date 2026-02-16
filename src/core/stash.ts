@@ -463,7 +463,8 @@ async function atomicWrite(
   filePath: string,
   content: string,
 ): Promise<void> {
-  const tmpPath = filePath + ".tmp";
+  const suffix = Math.random().toString(36).slice(2, 10);
+  const tmpPath = `${filePath}.${suffix}.tmp`;
   await fs.writeFile(tmpPath, content);
   await fs.rename(tmpPath, filePath);
 }
@@ -472,7 +473,8 @@ async function atomicWriteBinary(
   filePath: string,
   data: Uint8Array,
 ): Promise<void> {
-  const tmpPath = filePath + ".tmp";
+  const suffix = Math.random().toString(36).slice(2, 10);
+  const tmpPath = `${filePath}.${suffix}.tmp`;
   await fs.writeFile(tmpPath, data);
   await fs.rename(tmpPath, filePath);
 }

@@ -53,6 +53,10 @@ export class StashReconciler {
     this.fsWatcher.on("add", (filePath) => this.onFileCreated(filePath));
     this.fsWatcher.on("change", (filePath) => this.onFileModified(filePath));
     this.fsWatcher.on("unlink", (filePath) => this.onFileDeleted(filePath));
+
+    await new Promise<void>((resolve) => {
+      this.fsWatcher!.on("ready", resolve);
+    });
   }
 
   async close(): Promise<void> {
@@ -396,17 +400,17 @@ export class StashReconciler {
   private computeDiff(oldText: string, newText: string): Patch[] {
     const changes = diff(oldText, newText);
     const patches: Patch[] = [];
-    let index = 0;
+    let oldIndex = 0;
 
     for (const [op, text] of changes) {
       if (op === diff.EQUAL) {
-        index += text.length;
+        oldIndex += text.length;
       } else if (op === diff.DELETE) {
-        patches.push({ type: "delete", index, count: text.length });
-        // Don't advance index - deleted text is gone
+        patches.push({ type: "delete", index: oldIndex, count: text.length });
+        oldIndex += text.length; // Consumed from old text
       } else if (op === diff.INSERT) {
-        patches.push({ type: "insert", index, text });
-        index += text.length;
+        patches.push({ type: "insert", index: oldIndex, text });
+        // Don't advance oldIndex - nothing consumed from old text
       }
     }
 
