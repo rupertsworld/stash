@@ -2,6 +2,7 @@ import * as Automerge from "@automerge/automerge";
 import * as fs from "node:fs/promises";
 import * as nodePath from "node:path";
 import * as crypto from "node:crypto";
+import type { Dirent } from "node:fs";
 import chokidar from "chokidar";
 import diff from "fast-diff";
 import type { Stash } from "./stash.js";
@@ -70,6 +71,107 @@ export class StashReconciler {
     }
     this.pendingDeletes.clear();
     this.diskSnapshots.clear();
+  }
+
+  async scan(): Promise<void> {
+    const trackedFiles = this.stash.listAllFiles();
+    const trackedPaths = new Set(trackedFiles.map(([path]) => path));
+    const diskFiles = await this.walkDirectory(this.stash.path);
+    const diskFileSet = new Set(diskFiles);
+
+    // Import new files from disk
+    for (const relativePath of diskFiles) {
+      if (trackedPaths.has(relativePath)) continue;
+
+      const fullPath = nodePath.join(this.stash.path, relativePath);
+      let content: Buffer;
+      try {
+        content = await fs.readFile(fullPath);
+      } catch {
+        continue;
+      }
+
+      if (this.isUtf8(content)) {
+        const textContent = content.toString("utf-8");
+        this.stash.write(relativePath, textContent);
+
+        const doc = this.stash.getFileDocByPath(relativePath);
+        if (doc) {
+          this.diskSnapshots.set(relativePath, {
+            doc: Automerge.clone(doc),
+            content: textContent,
+          });
+        }
+      } else {
+        const hash = this.hashBuffer(content);
+        const size = content.length;
+        await this.storeBinaryBlob(hash, content);
+        this.stash.writeBinary(relativePath, hash, size);
+      }
+    }
+
+    // Delete files from automerge that no longer exist on disk
+    for (const [relativePath, docId] of trackedFiles) {
+      if (diskFileSet.has(relativePath)) continue;
+
+      const fileDoc = this.stash.getFileDoc(docId);
+      this.stash.delete(relativePath);
+      this.diskSnapshots.delete(relativePath);
+
+      // GC binary blob if unreferenced
+      if (fileDoc?.type === "binary") {
+        const binaryDoc = fileDoc as { type: "binary"; hash: string };
+        if (!this.stash.isHashReferenced(binaryDoc.hash)) {
+          const blobPath = nodePath.join(
+            this.stash.path,
+            ".stash",
+            "blobs",
+            `${binaryDoc.hash}.bin`,
+          );
+          try {
+            await fs.unlink(blobPath);
+          } catch {
+            // Already cleaned up
+          }
+        }
+      }
+    }
+
+    await this.stash.save();
+  }
+
+  private async walkDirectory(
+    rootPath: string,
+    relativePath: string = "",
+  ): Promise<string[]> {
+    const results: string[] = [];
+    const fullPath = relativePath
+      ? nodePath.join(rootPath, relativePath)
+      : rootPath;
+
+    let entries: Dirent[];
+    try {
+      entries = await fs.readdir(fullPath, { withFileTypes: true });
+    } catch {
+      return results;
+    }
+
+    for (const entry of entries) {
+      if (entry.name === ".stash" || entry.name.startsWith(".")) continue;
+
+      const childRelative = relativePath
+        ? `${relativePath}/${entry.name}`
+        : entry.name;
+
+      if (entry.isDirectory()) {
+        const subFiles = await this.walkDirectory(rootPath, childRelative);
+        results.push(...subFiles);
+      } else if (entry.isFile()) {
+        results.push(childRelative);
+      }
+    }
+
+    return results;
   }
 
   async flush(): Promise<void> {

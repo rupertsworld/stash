@@ -11,3 +11,8 @@ export const descriptionOption = new Option(
 );
 
 export const forceOption = new Option("--force", "skip confirmation prompts");
+
+export const remoteOption = new Option(
+  "--remote <remote>",
+  "sync remote (none, github:owner/repo)",
+);

@@ -18,6 +18,7 @@ import {
   pathOption,
   descriptionOption,
   forceOption,
+  remoteOption,
 } from "./cli/options.js";
 
 const program = new Command();
@@ -51,6 +52,7 @@ program
   .description("Create a new stash")
   .addOption(pathOption)
   .addOption(descriptionOption)
+  .addOption(remoteOption)
   .action((name, opts) => createStash(name, opts));
 
 program

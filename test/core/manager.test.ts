@@ -175,4 +175,130 @@ describe("StashManager", () => {
     const cfg = await config.readConfig(tmpDir);
     expect(cfg.stashes["my-stash"]).toBe(customPath);
   });
+
+  describe("import existing files", () => {
+    it("should import existing text files", async () => {
+      const existingDir = path.join(tmpDir, "existing-folder");
+      await fs.mkdir(existingDir, { recursive: true });
+      await fs.writeFile(path.join(existingDir, "readme.md"), "# Hello");
+      await fs.writeFile(path.join(existingDir, "notes.txt"), "Some notes");
+
+      const manager = await StashManager.load(tmpDir);
+      const stash = await manager.create("imported", existingDir);
+      await stash.flush();
+
+      expect(stash.read("readme.md")).toBe("# Hello");
+      expect(stash.read("notes.txt")).toBe("Some notes");
+      expect(stash.listAllFiles()).toHaveLength(2);
+    });
+
+    it("should import nested directories", async () => {
+      const existingDir = path.join(tmpDir, "nested-folder");
+      await fs.mkdir(path.join(existingDir, "docs", "api"), { recursive: true });
+      await fs.writeFile(path.join(existingDir, "root.md"), "root");
+      await fs.writeFile(path.join(existingDir, "docs", "guide.md"), "guide");
+      await fs.writeFile(path.join(existingDir, "docs", "api", "ref.md"), "ref");
+
+      const manager = await StashManager.load(tmpDir);
+      const stash = await manager.create("nested", existingDir);
+      await stash.flush();
+
+      expect(stash.read("root.md")).toBe("root");
+      expect(stash.read("docs/guide.md")).toBe("guide");
+      expect(stash.read("docs/api/ref.md")).toBe("ref");
+      expect(stash.listAllFiles()).toHaveLength(3);
+    });
+
+    it("should skip hidden files", async () => {
+      const existingDir = path.join(tmpDir, "with-hidden");
+      await fs.mkdir(existingDir, { recursive: true });
+      await fs.writeFile(path.join(existingDir, "visible.md"), "visible");
+      await fs.writeFile(path.join(existingDir, ".hidden"), "hidden");
+      await fs.writeFile(path.join(existingDir, ".gitignore"), "*.log");
+
+      const manager = await StashManager.load(tmpDir);
+      const stash = await manager.create("no-hidden", existingDir);
+      await stash.flush();
+
+      expect(stash.listAllFiles()).toHaveLength(1);
+      expect(stash.read("visible.md")).toBe("visible");
+    });
+
+    it("should skip .stash directory if it exists", async () => {
+      const existingDir = path.join(tmpDir, "has-stash-dir");
+      await fs.mkdir(path.join(existingDir, ".stash"), { recursive: true });
+      await fs.writeFile(path.join(existingDir, "file.md"), "content");
+      await fs.writeFile(path.join(existingDir, ".stash", "junk.txt"), "junk");
+
+      const manager = await StashManager.load(tmpDir);
+      // This should work - we import files but ignore existing .stash contents
+      const stash = await manager.create("with-stash-dir", existingDir);
+      await stash.flush();
+
+      expect(stash.listAllFiles()).toHaveLength(1);
+      expect(stash.read("file.md")).toBe("content");
+    });
+
+    it("should import binary files", async () => {
+      const existingDir = path.join(tmpDir, "with-binary");
+      await fs.mkdir(existingDir, { recursive: true });
+      await fs.writeFile(path.join(existingDir, "text.md"), "text");
+      // Create a binary file (PNG header bytes)
+      const binaryContent = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+      await fs.writeFile(path.join(existingDir, "image.png"), binaryContent);
+
+      const manager = await StashManager.load(tmpDir);
+      const stash = await manager.create("with-binary", existingDir);
+      await stash.flush();
+
+      expect(stash.listAllFiles()).toHaveLength(2);
+      expect(stash.read("text.md")).toBe("text");
+
+      // Binary file should be tracked
+      const files = stash.listAllFiles();
+      const binaryFile = files.find(([p]) => p === "image.png");
+      expect(binaryFile).toBeDefined();
+    });
+
+    it("should work with empty existing folder", async () => {
+      const existingDir = path.join(tmpDir, "empty-folder");
+      await fs.mkdir(existingDir, { recursive: true });
+
+      const manager = await StashManager.load(tmpDir);
+      const stash = await manager.create("empty", existingDir);
+      await stash.flush();
+
+      expect(stash.listAllFiles()).toHaveLength(0);
+    });
+
+    it("should work when folder does not exist", async () => {
+      const newDir = path.join(tmpDir, "new-folder");
+
+      const manager = await StashManager.load(tmpDir);
+      const stash = await manager.create("new", newDir);
+      await stash.flush();
+
+      expect(stash.listAllFiles()).toHaveLength(0);
+      // Folder should be created
+      const stat = await fs.stat(newDir);
+      expect(stat.isDirectory()).toBe(true);
+    });
+
+    it("should skip symlinks", async () => {
+      const existingDir = path.join(tmpDir, "with-symlinks");
+      const targetDir = path.join(tmpDir, "symlink-target");
+      await fs.mkdir(existingDir, { recursive: true });
+      await fs.mkdir(targetDir, { recursive: true });
+      await fs.writeFile(path.join(existingDir, "real.md"), "real");
+      await fs.writeFile(path.join(targetDir, "linked.md"), "linked");
+      await fs.symlink(targetDir, path.join(existingDir, "link"));
+
+      const manager = await StashManager.load(tmpDir);
+      const stash = await manager.create("no-symlinks", existingDir);
+      await stash.flush();
+
+      expect(stash.listAllFiles()).toHaveLength(1);
+      expect(stash.read("real.md")).toBe("real");
+    });
+  });
 });

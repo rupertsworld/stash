@@ -1,5 +1,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import * as crypto from "node:crypto";
+import type { Dirent } from "node:fs";
 import { Stash, type StashMeta } from "./stash.js";
 import {
   DEFAULT_STASH_DIR,
@@ -10,7 +12,7 @@ import {
   type GlobalConfig,
 } from "./config.js";
 import type { SyncProvider } from "../providers/types.js";
-import { GitHubProvider } from "../providers/github.js";
+import { GitHubProvider, parseGitHubRemote } from "../providers/github.js";
 
 export class StashManager {
   private stashes: Map<string, Stash>;
@@ -45,13 +47,11 @@ export class StashManager {
           const meta: StashMeta = JSON.parse(metaData);
 
           if (meta.remote) {
-            const [providerType, ...rest] = meta.remote.split(":");
-            const repoPath = rest.join(":");
-            if (providerType === "github" && repoPath) {
+            const parsed = parseGitHubRemote(meta.remote);
+            if (parsed) {
               const token = await getGitHubToken(baseDir);
               if (token) {
-                const [owner, repo] = repoPath.split("/");
-                provider = new GitHubProvider(token, owner, repo);
+                provider = new GitHubProvider(token, parsed.owner, parsed.repo, parsed.pathPrefix);
               }
             }
           }
@@ -114,6 +114,10 @@ export class StashManager {
       remote,
       description,
     );
+
+    // Import existing files if folder exists
+    await this.importExistingFiles(stash, resolvedPath);
+
     await stash.save();
 
     // Register in global config
@@ -194,5 +198,94 @@ export class StashManager {
     if (errors.length > 0) {
       throw new AggregateError(errors, "Some stashes failed to sync");
     }
+  }
+
+  private async importExistingFiles(
+    stash: Stash,
+    rootPath: string,
+  ): Promise<void> {
+    try {
+      await fs.access(rootPath);
+    } catch {
+      // Folder doesn't exist yet, nothing to import
+      return;
+    }
+
+    const files = await this.walkDirectory(rootPath);
+
+    for (const relativePath of files) {
+      const fullPath = path.join(rootPath, relativePath);
+      const content = await fs.readFile(fullPath);
+
+      if (this.isUtf8(content)) {
+        stash.write(relativePath, content.toString("utf-8"));
+      } else {
+        // Binary file - store hash and blob
+        const hash = this.hashBuffer(content);
+        const size = content.length;
+        await this.storeBinaryBlob(rootPath, hash, content);
+        stash.writeBinary(relativePath, hash, size);
+      }
+    }
+  }
+
+  private async walkDirectory(
+    rootPath: string,
+    relativePath: string = "",
+  ): Promise<string[]> {
+    const results: string[] = [];
+    const fullPath = relativePath
+      ? path.join(rootPath, relativePath)
+      : rootPath;
+
+    let entries: Dirent[];
+    try {
+      entries = await fs.readdir(fullPath, { withFileTypes: true });
+    } catch {
+      return results;
+    }
+
+    for (const entry of entries) {
+      // Skip .stash directory and hidden files
+      if (entry.name === ".stash" || entry.name.startsWith(".")) continue;
+
+      const childRelative = relativePath
+        ? `${relativePath}/${entry.name}`
+        : entry.name;
+
+      if (entry.isDirectory()) {
+        const subFiles = await this.walkDirectory(rootPath, childRelative);
+        results.push(...subFiles);
+      } else if (entry.isFile()) {
+        results.push(childRelative);
+      }
+      // Skip symlinks (isFile() returns false for symlinks)
+    }
+
+    return results;
+  }
+
+  private isUtf8(buffer: Buffer): boolean {
+    try {
+      const text = buffer.toString("utf-8");
+      return !text.includes("\uFFFD");
+    } catch {
+      return false;
+    }
+  }
+
+  private hashBuffer(buffer: Buffer): string {
+    return crypto.createHash("sha256").update(buffer).digest("hex");
+  }
+
+  private async storeBinaryBlob(
+    rootPath: string,
+    hash: string,
+    content: Buffer,
+  ): Promise<void> {
+    const blobDir = path.join(rootPath, ".stash", "blobs");
+    await fs.mkdir(blobDir, { recursive: true });
+    const blobPath = path.join(blobDir, `${hash}.bin`);
+    await fs.writeFile(blobPath, content);
   }
 }

@@ -13,38 +13,82 @@ interface TreeEntry {
   sha?: string | null;  // null = delete file
 }
 
+export interface ParsedGitHubRemote {
+  owner: string;
+  repo: string;
+  pathPrefix: string;
+}
+
+/**
+ * Parse a GitHub remote string into components.
+ * Format: github:owner/repo[/path]
+ * Examples:
+ *   github:user/repo → { owner: "user", repo: "repo", pathPrefix: "" }
+ *   github:user/repo/notes → { owner: "user", repo: "repo", pathPrefix: "notes" }
+ *   github:user/repo/a/b/c → { owner: "user", repo: "repo", pathPrefix: "a/b/c" }
+ */
+export function parseGitHubRemote(remote: string): ParsedGitHubRemote | null {
+  if (!remote.startsWith("github:")) return null;
+
+  const key = remote.slice("github:".length);
+  const parts = key.split("/");
+
+  if (parts.length < 2) return null;
+
+  const [owner, repo, ...pathParts] = parts;
+  if (!owner || !repo) return null;
+
+  return {
+    owner,
+    repo,
+    pathPrefix: pathParts.join("/"),
+  };
+}
+
 export class GitHubProvider implements SyncProvider {
   private octokit: Octokit;
   private owner: string;
   private repo: string;
+  private pathPrefix: string;
   private branch: string;
 
-  constructor(token: string, owner: string, repo: string, branch = "main") {
+  constructor(token: string, owner: string, repo: string, pathPrefix = "", branch = "main") {
     this.octokit = new Octokit({ auth: token });
     this.owner = owner;
     this.repo = repo;
+    this.pathPrefix = pathPrefix;
     this.branch = branch;
   }
 
-  async create(): Promise<void> {
-    // Check if user is the owner (personal repo) or org
-    const { data: user } = await this.octokit.rest.users.getAuthenticated();
+  private prefixPath(path: string): string {
+    if (!this.pathPrefix) return path;
+    return `${this.pathPrefix}/${path}`;
+  }
 
-    if (user.login === this.owner) {
-      // Personal repo
-      await this.octokit.rest.repos.createForAuthenticatedUser({
-        name: this.repo,
-        private: true,
-        auto_init: false,
-      });
-    } else {
-      // Org repo
-      await this.octokit.rest.repos.createInOrg({
-        org: this.owner,
-        name: this.repo,
-        private: true,
-        auto_init: false,
-      });
+  async create(): Promise<void> {
+    // Check if repo exists first
+    const repoExists = await this.exists();
+
+    if (!repoExists) {
+      // Check if user is the owner (personal repo) or org
+      const { data: user } = await this.octokit.rest.users.getAuthenticated();
+
+      if (user.login === this.owner) {
+        // Personal repo
+        await this.octokit.rest.repos.createForAuthenticatedUser({
+          name: this.repo,
+          private: true,
+          auto_init: false,
+        });
+      } else {
+        // Org repo
+        await this.octokit.rest.repos.createInOrg({
+          org: this.owner,
+          name: this.repo,
+          private: true,
+          auto_init: false,
+        });
+      }
     }
 
     // Create initial commit with .stash placeholder
@@ -52,7 +96,7 @@ export class GitHubProvider implements SyncProvider {
     await this.octokit.rest.repos.createOrUpdateFileContents({
       owner: this.owner,
       repo: this.repo,
-      path: ".stash/.gitkeep",
+      path: this.prefixPath(".stash/.gitkeep"),
       message: "Initialize stash",
       content: Buffer.from("").toString("base64"),
     });
@@ -72,11 +116,118 @@ export class GitHubProvider implements SyncProvider {
     }
   }
 
+  async isEmpty(): Promise<boolean> {
+    try {
+      // Check if the repo has any commits
+      const { data: commits } = await this.octokit.rest.repos.listCommits({
+        owner: this.owner,
+        repo: this.repo,
+        per_page: 1,
+      });
+      return commits.length === 0;
+    } catch (err) {
+      const error = err as Error & { status?: number };
+      // 409 = empty repo (no commits), which counts as empty
+      if (error.status === 409) return true;
+      // 404 = repo doesn't exist
+      if (error.status === 404) return true;
+      throw err;
+    }
+  }
+
   async delete(): Promise<void> {
-    await this.octokit.rest.repos.delete({
+    if (!this.pathPrefix) {
+      // No path prefix - delete entire repo
+      await this.octokit.rest.repos.delete({
+        owner: this.owner,
+        repo: this.repo,
+      });
+      return;
+    }
+
+    // With path prefix - delete only files under the prefix
+    const filesToDelete = await this.listAllFilesUnderPrefix();
+    if (filesToDelete.length === 0) return;
+
+    // Create tree entries with sha: null to delete files
+    const treeEntries: TreeEntry[] = filesToDelete.map((path) => ({
+      path,
+      mode: "100644" as const,
+      type: "blob" as const,
+      sha: null,
+    }));
+
+    // Get current commit SHA
+    const { data: ref } = await this.octokit.rest.git.getRef({
       owner: this.owner,
       repo: this.repo,
+      ref: `heads/${this.branch}`,
     });
+    const parentSha = ref.object.sha;
+
+    const { data: commit } = await this.octokit.rest.git.getCommit({
+      owner: this.owner,
+      repo: this.repo,
+      commit_sha: parentSha,
+    });
+    const baseTreeSha = commit.tree.sha;
+
+    // Create tree with deletions
+    const { data: tree } = await this.octokit.rest.git.createTree({
+      owner: this.owner,
+      repo: this.repo,
+      tree: treeEntries,
+      base_tree: baseTreeSha,
+    });
+
+    // Create commit
+    const { data: newCommit } = await this.octokit.rest.git.createCommit({
+      owner: this.owner,
+      repo: this.repo,
+      message: `Delete stash: ${this.pathPrefix}`,
+      tree: tree.sha,
+      parents: [parentSha],
+    });
+
+    // Update ref
+    await this.octokit.rest.git.updateRef({
+      owner: this.owner,
+      repo: this.repo,
+      ref: `heads/${this.branch}`,
+      sha: newCommit.sha,
+    });
+  }
+
+  private async listAllFilesUnderPrefix(): Promise<string[]> {
+    const files: string[] = [];
+
+    const walk = async (dirPath: string): Promise<void> => {
+      try {
+        const { data } = await this.octokit.rest.repos.getContent({
+          owner: this.owner,
+          repo: this.repo,
+          path: dirPath,
+          ref: this.branch,
+        });
+
+        if (!Array.isArray(data)) return;
+
+        for (const item of data) {
+          if (item.type === "file") {
+            files.push(item.path);
+          } else if (item.type === "dir") {
+            await walk(item.path);
+          }
+        }
+      } catch (err) {
+        const error = err as Error & { status?: number };
+        if (error.status === 404) return;
+        throw err;
+      }
+    };
+
+    await walk(this.pathPrefix);
+    return files;
   }
 
   async sync(
@@ -154,18 +305,18 @@ export class GitHubProvider implements SyncProvider {
     try {
       // Get structure doc
       const structureBlob = await this.getFileContent(
-        ".stash/structure.automerge",
+        this.prefixPath(".stash/structure.automerge"),
       );
       if (structureBlob) {
         docs.set("structure", structureBlob);
       }
 
       // List and fetch doc files
-      const docFiles = await this.listDirectory(".stash/docs");
+      const docFiles = await this.listDirectory(this.prefixPath(".stash/docs"));
       for (const file of docFiles) {
         if (!file.endsWith(".automerge")) continue;
         const docId = file.replace(".automerge", "");
-        const blob = await this.getFileContent(`.stash/docs/${file}`);
+        const blob = await this.getFileContent(this.prefixPath(`.stash/docs/${file}`));
         if (blob) docs.set(docId, blob);
       }
     } catch (err) {
@@ -192,7 +343,7 @@ export class GitHubProvider implements SyncProvider {
     if (structureData) {
       const blob = await this.createBlob(structureData);
       treeEntries.push({
-        path: ".stash/structure.automerge",
+        path: this.prefixPath(".stash/structure.automerge"),
         mode: "100644",
         type: "blob",
         sha: blob,
@@ -204,21 +355,21 @@ export class GitHubProvider implements SyncProvider {
       if (docId === "structure") continue;
       const blob = await this.createBlob(data);
       treeEntries.push({
-        path: `.stash/docs/${docId}.automerge`,
+        path: this.prefixPath(`.stash/docs/${docId}.automerge`),
         mode: "100644",
         type: "blob",
         sha: blob,
       });
     }
 
-    // Render plain text files
+    // Render plain text files (already prefixed by renderPlainText)
     const plainTextEntries = this.renderPlainText(docs);
     treeEntries.push(...plainTextEntries);
 
-    // Delete removed files (set sha to null)
+    // Delete removed files (set sha to null) - need to prefix
     for (const deletedPath of deletedPaths) {
       treeEntries.push({
-        path: deletedPath,
+        path: this.prefixPath(deletedPath),
         mode: "100644",
         type: "blob",
         sha: null,
@@ -297,7 +448,7 @@ export class GitHubProvider implements SyncProvider {
       const fileDoc = Automerge.load<FileDoc>(fileData);
       const content = getContent(fileDoc);
       entries.push({
-        path: filePath,
+        path: this.prefixPath(filePath),
         mode: "100644",
         type: "blob",
         content,

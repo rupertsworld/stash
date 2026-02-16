@@ -391,4 +391,106 @@ describe("StashReconciler", { timeout: 15000 }, () => {
       expect(stash.read("c.md")).toBe("content c");
     });
   });
+
+  describe("scan", () => {
+    it("should import existing files from disk", async () => {
+      // Create file on disk before scan
+      await fs.writeFile(path.join(tmpDir, "existing.md"), "from disk");
+
+      await reconciler.scan();
+
+      expect(stash.read("existing.md")).toBe("from disk");
+      expect(stash.listAllFiles()).toHaveLength(1);
+    });
+
+    it("should import nested directories", async () => {
+      await fs.mkdir(path.join(tmpDir, "docs"), { recursive: true });
+      await fs.writeFile(path.join(tmpDir, "root.md"), "root");
+      await fs.writeFile(path.join(tmpDir, "docs", "guide.md"), "guide");
+
+      await reconciler.scan();
+
+      expect(stash.read("root.md")).toBe("root");
+      expect(stash.read("docs/guide.md")).toBe("guide");
+      expect(stash.listAllFiles()).toHaveLength(2);
+    });
+
+    it("should skip hidden files", async () => {
+      await fs.writeFile(path.join(tmpDir, "visible.md"), "visible");
+      await fs.writeFile(path.join(tmpDir, ".hidden"), "hidden");
+
+      await reconciler.scan();
+
+      expect(stash.listAllFiles()).toHaveLength(1);
+      expect(stash.read("visible.md")).toBe("visible");
+    });
+
+    it("should skip .stash directory", async () => {
+      await fs.writeFile(path.join(tmpDir, "file.md"), "content");
+      // .stash already exists from beforeEach
+
+      await reconciler.scan();
+
+      expect(stash.listAllFiles()).toHaveLength(1);
+    });
+
+    it("should not re-import already tracked files", async () => {
+      stash.write("tracked.md", "from automerge");
+      await stash.flush();
+
+      // Same file exists on disk with different content
+      await fs.writeFile(path.join(tmpDir, "tracked.md"), "from disk");
+
+      await reconciler.scan();
+
+      // Should keep automerge version, not overwrite
+      expect(stash.read("tracked.md")).toBe("from automerge");
+    });
+
+    it("should import binary files", async () => {
+      const binaryContent = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a]);
+      await fs.writeFile(path.join(tmpDir, "image.png"), binaryContent);
+
+      await reconciler.scan();
+
+      const files = stash.listAllFiles();
+      expect(files).toHaveLength(1);
+      expect(files[0][0]).toBe("image.png");
+    });
+
+    it("should delete files from automerge that are missing from disk", async () => {
+      // Create file via stash API and write to disk
+      stash.write("will-delete.md", "content");
+      await stash.flush();
+      await reconciler.flush();
+
+      // Verify it's tracked and on disk
+      expect(stash.listAllFiles()).toHaveLength(1);
+
+      // Delete file from disk (not via stash API)
+      await fs.unlink(path.join(tmpDir, "will-delete.md"));
+
+      // Scan should detect the deletion
+      await reconciler.scan();
+
+      expect(stash.listAllFiles()).toHaveLength(0);
+    });
+
+    it("should handle mixed additions and deletions", async () => {
+      // Start with one file
+      stash.write("old.md", "old content");
+      await stash.flush();
+      await reconciler.flush();
+
+      // Delete old file from disk, add new file
+      await fs.unlink(path.join(tmpDir, "old.md"));
+      await fs.writeFile(path.join(tmpDir, "new.md"), "new content");
+
+      await reconciler.scan();
+
+      expect(stash.listAllFiles()).toHaveLength(1);
+      expect(() => stash.read("old.md")).toThrow("File not found");
+      expect(stash.read("new.md")).toBe("new content");
+    });
+  });
 });
