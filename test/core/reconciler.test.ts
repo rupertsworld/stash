@@ -92,24 +92,45 @@ describe("StashReconciler", { timeout: 15000 }, () => {
       expect(content).toBe("v2");
     });
 
-    it("should remove orphaned files not tracked in automerge", async () => {
+    it("should import untracked files from disk during flush (filesystem-first)", async () => {
       stash.write("keep.md", "keep");
       await stash.flush();
       await reconciler.flush();
 
-      // Create an orphan file on disk
-      await fs.writeFile(path.join(tmpDir, "orphan.md"), "orphan");
+      // Create a new file on disk that isn't tracked
+      await fs.writeFile(path.join(tmpDir, "new.md"), "new content");
 
       await reconciler.flush();
 
-      await expect(
-        fs.access(path.join(tmpDir, "orphan.md")),
-      ).rejects.toThrow();
+      // With filesystem-first, the file should be imported, not deleted
+      const newContent = await fs.readFile(
+        path.join(tmpDir, "new.md"),
+        "utf-8",
+      );
+      expect(newContent).toBe("new content");
+      expect(stash.read("new.md")).toBe("new content");
       const keep = await fs.readFile(
         path.join(tmpDir, "keep.md"),
         "utf-8",
       );
       expect(keep).toBe("keep");
+    });
+
+    it("should delete known tombstoned files during flush", async () => {
+      // Create file via automerge, flush to disk
+      stash.write("toDelete.md", "will be deleted");
+      await stash.flush();
+      await reconciler.flush();
+
+      // Delete via automerge (creates tombstone)
+      stash.delete("toDelete.md");
+      await stash.flush();
+      await reconciler.flush();
+
+      // File should be removed from disk
+      await expect(
+        fs.access(path.join(tmpDir, "toDelete.md")),
+      ).rejects.toThrow();
     });
 
     it("should skip .stash directory during orphan cleanup", async () => {

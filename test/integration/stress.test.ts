@@ -127,23 +127,16 @@ describe("Integration: end-to-end workflows", () => {
     const remoteStore = new Map<string, Uint8Array>();
 
     const mockProvider: SyncProvider = {
-      async sync(docs) {
-        const result = new Map<string, Uint8Array>();
-        for (const [key, data] of remoteStore) {
-          result.set(key, data);
-        }
+      async fetch() {
+        return new Map(remoteStore);
+      },
+      async push(docs, _files) {
         for (const [key, data] of docs) {
-          result.set(key, data);
-        }
-        for (const [key, data] of result) {
           remoteStore.set(key, data);
         }
-        return result;
-      },
-      async exists() {
-        return true;
       },
       async create() {},
+      async delete() {},
     };
 
     const stash = Stash.create(

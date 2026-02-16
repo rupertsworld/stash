@@ -189,6 +189,7 @@ export class StashReconciler {
 
         if (doc.type === "text") {
           const automergeContent = (doc as Automerge.Doc<TextFileDoc>).content.toString();
+          const snapshot = this.diskSnapshots.get(filePath);
 
           let diskContent: string | null = null;
           try {
@@ -197,14 +198,28 @@ export class StashReconciler {
             // File doesn't exist on disk
           }
 
-          if (diskContent !== automergeContent) {
+          if (diskContent === null && snapshot) {
+            // File was deleted from disk (we had a snapshot, now it's gone)
+            // Don't recreate - tombstone it instead
+            this.stash.delete(filePath);
+            this.diskSnapshots.delete(filePath);
+          } else if (diskContent !== null && snapshot && diskContent !== snapshot.content) {
+            // Disk was modified by user - import changes instead of overwriting
+            await this.onFileModified(diskPath);
+          } else if (diskContent !== automergeContent) {
+            // Disk matches snapshot (or no snapshot), automerge changed - write to disk
             await fs.writeFile(diskPath, automergeContent);
+            this.diskSnapshots.set(filePath, {
+              doc: Automerge.clone(doc),
+              content: automergeContent,
+            });
+          } else {
+            // Everything in sync, just update snapshot
+            this.diskSnapshots.set(filePath, {
+              doc: Automerge.clone(doc),
+              content: automergeContent,
+            });
           }
-
-          this.diskSnapshots.set(filePath, {
-            doc: Automerge.clone(doc),
-            content: automergeContent,
-          });
         } else if (doc.type === "binary") {
           const binaryDoc = doc as { type: "binary"; hash: string; size: number };
           const blobPath = nodePath.join(
@@ -214,7 +229,12 @@ export class StashReconciler {
             `${binaryDoc.hash}.bin`,
           );
           const currentHash = await this.hashFile(diskPath).catch(() => null);
-          if (currentHash !== binaryDoc.hash) {
+
+          if (currentHash === null && this.stash.isKnownPath(filePath)) {
+            // Binary file was deleted from disk (we knew about it, now it's gone)
+            // Don't recreate - tombstone it instead
+            this.stash.delete(filePath);
+          } else if (currentHash !== binaryDoc.hash) {
             try {
               await fs.copyFile(blobPath, diskPath);
             } catch {
@@ -420,6 +440,7 @@ export class StashReconciler {
       this.stash.writeBinary(relativePath, hash, size);
     }
 
+    this.stash.addKnownPath(relativePath);
     await this.stash.save();
     this.stash.scheduleSync();
   }
@@ -570,8 +591,9 @@ export class StashReconciler {
     await fs.writeFile(blobPath, content);
   }
 
-  // --- Cleanup ---
+  // --- Cleanup with tombstone + known-paths logic ---
   private async cleanupOrphanedFiles(): Promise<void> {
+    // Get tracked (non-deleted) paths
     const trackedPaths = new Set(
       this.stash.listAllFiles().map(([p]) => p),
     );
@@ -592,7 +614,12 @@ export class StashReconciler {
       ? nodePath.join(rootDir, relativePath)
       : rootDir;
 
-    const entries = await fs.readdir(fullPath, { withFileTypes: true });
+    let entries;
+    try {
+      entries = await fs.readdir(fullPath, { withFileTypes: true });
+    } catch {
+      return;
+    }
 
     for (const entry of entries) {
       if (entry.name === ".stash") continue;
@@ -605,11 +632,96 @@ export class StashReconciler {
       if (entry.isDirectory()) {
         await this.walkAndClean(rootDir, childRelative, trackedPaths);
       } else if (entry.isFile()) {
-        if (!trackedPaths.has(childRelative)) {
-          await fs.unlink(nodePath.join(fullPath, entry.name));
-        }
+        await this.handleFileCleanup(childRelative, trackedPaths);
       }
     }
+  }
+
+  private async handleFileCleanup(
+    relativePath: string,
+    trackedPaths: Set<string>,
+  ): Promise<void> {
+    const diskPath = nodePath.join(this.stash.path, relativePath);
+    const isTracked = trackedPaths.has(relativePath);
+    const isDeleted = this.stash.isDeleted(relativePath);
+    const isKnown = this.stash.isKnownPath(relativePath);
+
+    if (isDeleted) {
+      // File has tombstone
+      if (isKnown) {
+        // We knew about this file - remote/local deletion wins
+        await fs.unlink(diskPath);
+        this.stash.removeKnownPath(relativePath);
+        this.diskSnapshots.delete(relativePath);
+      } else {
+        // We didn't know about this file - it's new local work, resurrect
+        await this.resurrectFile(relativePath, diskPath);
+      }
+    } else if (!isTracked) {
+      // File not in structure at all - import as new
+      await this.importNewFile(relativePath, diskPath);
+    }
+    // else: normal tracked file, keep it
+  }
+
+  private async resurrectFile(relativePath: string, diskPath: string): Promise<void> {
+    let content: Buffer;
+    try {
+      content = await fs.readFile(diskPath);
+    } catch {
+      return; // File was deleted in the meantime
+    }
+
+    if (this.isUtf8(content)) {
+      const textContent = content.toString("utf-8");
+      this.stash.write(relativePath, textContent);
+
+      const doc = this.stash.getFileDocByPath(relativePath);
+      if (doc) {
+        this.diskSnapshots.set(relativePath, {
+          doc: Automerge.clone(doc),
+          content: textContent,
+        });
+      }
+    } else {
+      const hash = this.hashBuffer(content);
+      const size = content.length;
+      await this.storeBinaryBlob(hash, content);
+      this.stash.writeBinary(relativePath, hash, size);
+    }
+
+    this.stash.addKnownPath(relativePath);
+    await this.stash.save();
+  }
+
+  private async importNewFile(relativePath: string, diskPath: string): Promise<void> {
+    let content: Buffer;
+    try {
+      content = await fs.readFile(diskPath);
+    } catch {
+      return; // File was deleted in the meantime
+    }
+
+    if (this.isUtf8(content)) {
+      const textContent = content.toString("utf-8");
+      this.stash.write(relativePath, textContent);
+
+      const doc = this.stash.getFileDocByPath(relativePath);
+      if (doc) {
+        this.diskSnapshots.set(relativePath, {
+          doc: Automerge.clone(doc),
+          content: textContent,
+        });
+      }
+    } else {
+      const hash = this.hashBuffer(content);
+      const size = content.length;
+      await this.storeBinaryBlob(hash, content);
+      this.stash.writeBinary(relativePath, hash, size);
+    }
+
+    this.stash.addKnownPath(relativePath);
+    await this.stash.save();
   }
 
   private async reconcile(): Promise<void> {

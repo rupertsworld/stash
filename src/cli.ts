@@ -28,16 +28,7 @@ program
   .description(
     "A local-first collaborative folder service with MCP interface",
   )
-  .version("1.0.0")
-  .action(async () => {
-    // Bare `stash` command: start daemon + create symlinks from .stash.json
-    await startDaemon();
-    try {
-      await linkStash();
-    } catch {
-      // .stash.json might not exist, that's fine
-    }
-  });
+  .version("1.0.0");
 
 // Auth
 const auth = program.command("auth").description("Authentication commands");

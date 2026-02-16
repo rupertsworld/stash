@@ -1,9 +1,5 @@
 import { Octokit } from "octokit";
-import * as Automerge from "@automerge/automerge";
 import type { SyncProvider } from "./types.js";
-import { SyncError } from "../core/errors.js";
-import type { StructureDoc } from "../core/structure.js";
-import { getContent, type FileDoc } from "../core/file.js";
 
 interface TreeEntry {
   path: string;
@@ -66,71 +62,35 @@ export class GitHubProvider implements SyncProvider {
   }
 
   async create(): Promise<void> {
-    // Check if repo exists first
-    const repoExists = await this.exists();
-
-    if (!repoExists) {
-      // Check if user is the owner (personal repo) or org
-      const { data: user } = await this.octokit.rest.users.getAuthenticated();
-
-      if (user.login === this.owner) {
-        // Personal repo
-        await this.octokit.rest.repos.createForAuthenticatedUser({
-          name: this.repo,
-          private: true,
-          auto_init: false,
-        });
-      } else {
-        // Org repo
-        await this.octokit.rest.repos.createInOrg({
-          org: this.owner,
-          name: this.repo,
-          private: true,
-          auto_init: false,
-        });
-      }
+    // Idempotent - check if .stash already initialized
+    try {
+      await this.octokit.rest.repos.getContent({
+        owner: this.owner,
+        repo: this.repo,
+        path: this.prefixPath(".stash/.gitkeep"),
+      });
+      // Already exists, no-op
+      return;
+    } catch (err) {
+      const error = err as Error & { status?: number };
+      if (error.status !== 404) throw err;
+      // Doesn't exist, create it
     }
 
     // Create initial commit with .stash placeholder
     // (Git API requires at least one commit before we can use blobs/trees)
-    await this.octokit.rest.repos.createOrUpdateFileContents({
-      owner: this.owner,
-      repo: this.repo,
-      path: this.prefixPath(".stash/.gitkeep"),
-      message: "Initialize stash",
-      content: Buffer.from("").toString("base64"),
-    });
-  }
-
-  async exists(): Promise<boolean> {
     try {
-      await this.octokit.rest.repos.get({
+      await this.octokit.rest.repos.createOrUpdateFileContents({
         owner: this.owner,
         repo: this.repo,
+        path: this.prefixPath(".stash/.gitkeep"),
+        message: "Initialize stash",
+        content: Buffer.from("").toString("base64"),
       });
-      return true;
     } catch (err) {
       const error = err as Error & { status?: number };
-      if (error.status === 404) return false;
-      throw err;
-    }
-  }
-
-  async isEmpty(): Promise<boolean> {
-    try {
-      // Check if the repo has any commits
-      const { data: commits } = await this.octokit.rest.repos.listCommits({
-        owner: this.owner,
-        repo: this.repo,
-        per_page: 1,
-      });
-      return commits.length === 0;
-    } catch (err) {
-      const error = err as Error & { status?: number };
-      // 409 = empty repo (no commits), which counts as empty
-      if (error.status === 409) return true;
-      // 404 = repo doesn't exist
-      if (error.status === 404) return true;
+      // 422 = file already exists (race condition), that's fine
+      if (error.status === 422) return;
       throw err;
     }
   }
@@ -230,76 +190,7 @@ export class GitHubProvider implements SyncProvider {
     return files;
   }
 
-  async sync(
-    localDocs: Map<string, Uint8Array>,
-  ): Promise<Map<string, Uint8Array>> {
-    try {
-      // 1. Fetch remote docs
-      const remoteDocs = await this.fetch();
-
-      // 2. Get remote file paths (for deletion tracking)
-      const remoteFilePaths = new Set<string>();
-      const remoteStructure = remoteDocs.get("structure");
-      if (remoteStructure) {
-        const remoteStructureDoc = Automerge.load<StructureDoc>(remoteStructure);
-        for (const filePath of Object.keys(remoteStructureDoc.files)) {
-          remoteFilePaths.add(filePath);
-        }
-      }
-
-      // 3. Merge all locally
-      const merged = new Map<string, Uint8Array>();
-      for (const [docId, localData] of localDocs) {
-        let doc = Automerge.load<unknown>(localData);
-        const remoteData = remoteDocs.get(docId);
-        if (remoteData) {
-          const remoteDoc = Automerge.load<unknown>(remoteData);
-          doc = Automerge.merge(doc, remoteDoc as typeof doc);
-        }
-        merged.set(docId, Automerge.save(doc));
-      }
-
-      // 4. Include remote-only docs
-      for (const [docId, remoteData] of remoteDocs) {
-        if (!localDocs.has(docId)) {
-          merged.set(docId, remoteData);
-        }
-      }
-
-      // 5. Find deleted file paths
-      const mergedFilePaths = new Set<string>();
-      const mergedStructure = merged.get("structure");
-      if (mergedStructure) {
-        const mergedStructureDoc = Automerge.load<StructureDoc>(mergedStructure);
-        for (const filePath of Object.keys(mergedStructureDoc.files)) {
-          mergedFilePaths.add(filePath);
-        }
-      }
-      const deletedPaths = [...remoteFilePaths].filter(p => !mergedFilePaths.has(p));
-
-      // 6. Push all changes atomically (including deletions)
-      await this.push(merged, deletedPaths);
-
-      return merged;
-    } catch (err) {
-      if (err instanceof SyncError) throw err;
-      const error = err as Error & { status?: number };
-      if (error.status === 401 || error.status === 403) {
-        throw new SyncError(
-          `Authentication failed: ${error.message}`,
-          false,
-          error,
-        );
-      }
-      throw new SyncError(
-        `Sync failed: ${error.message}`,
-        true,
-        error,
-      );
-    }
-  }
-
-  private async fetch(): Promise<Map<string, Uint8Array>> {
+  async fetch(): Promise<Map<string, Uint8Array>> {
     const docs = new Map<string, Uint8Array>();
 
     try {
@@ -331,7 +222,7 @@ export class GitHubProvider implements SyncProvider {
     return docs;
   }
 
-  private async push(docs: Map<string, Uint8Array>, deletedPaths: string[] = []): Promise<void> {
+  async push(docs: Map<string, Uint8Array>, files: Map<string, string | Buffer>): Promise<void> {
     // Nothing to push if no docs
     if (docs.size === 0) return;
 
@@ -362,23 +253,32 @@ export class GitHubProvider implements SyncProvider {
       });
     }
 
-    // Render plain text files (already prefixed by renderPlainText)
-    const plainTextEntries = this.renderPlainText(docs);
-    treeEntries.push(...plainTextEntries);
-
-    // Delete removed files (set sha to null) - need to prefix
-    for (const deletedPath of deletedPaths) {
-      treeEntries.push({
-        path: this.prefixPath(deletedPath),
-        mode: "100644",
-        type: "blob",
-        sha: null,
-      });
+    // Add user files
+    for (const [filePath, content] of files) {
+      if (typeof content === "string") {
+        treeEntries.push({
+          path: this.prefixPath(filePath),
+          mode: "100644",
+          type: "blob",
+          content,
+        });
+      } else {
+        // Binary - need to create blob first
+        const blob = await this.createBlob(content);
+        treeEntries.push({
+          path: this.prefixPath(filePath),
+          mode: "100644",
+          type: "blob",
+          sha: blob,
+        });
+      }
     }
 
-    // Get current commit SHA
+    // Get current commit SHA and list existing files
     let baseTreeSha: string | undefined;
     let parentSha: string | undefined;
+    const existingFiles = new Set<string>();
+
     try {
       const { data: ref } = await this.octokit.rest.git.getRef({
         owner: this.owner,
@@ -393,10 +293,35 @@ export class GitHubProvider implements SyncProvider {
         commit_sha: parentSha,
       });
       baseTreeSha = commit.tree.sha;
+
+      // List existing files to compute deletions
+      const remoteFiles = await this.listAllFilesUnderPrefix();
+      for (const file of remoteFiles) {
+        // Strip prefix to get relative path
+        const relativePath = this.pathPrefix
+          ? file.slice(this.pathPrefix.length + 1)
+          : file;
+        // Only track user files, not .stash/
+        if (!relativePath.startsWith(".stash/")) {
+          existingFiles.add(relativePath);
+        }
+      }
     } catch (err) {
       const error = err as Error & { status?: number };
       if (error.status !== 404) throw err;
       // No commits yet, will create initial commit
+    }
+
+    // Delete files that exist on remote but not in desired state
+    for (const existingPath of existingFiles) {
+      if (!files.has(existingPath)) {
+        treeEntries.push({
+          path: this.prefixPath(existingPath),
+          mode: "100644",
+          type: "blob",
+          sha: null,
+        });
+      }
     }
 
     // Create tree
@@ -432,30 +357,6 @@ export class GitHubProvider implements SyncProvider {
         sha: commit.sha,
       });
     }
-  }
-
-  private renderPlainText(docs: Map<string, Uint8Array>): TreeEntry[] {
-    const entries: TreeEntry[] = [];
-
-    const structureData = docs.get("structure");
-    if (!structureData) return entries;
-
-    const structureDoc = Automerge.load<StructureDoc>(structureData);
-
-    for (const [filePath, entry] of Object.entries(structureDoc.files)) {
-      const fileData = docs.get(entry.docId);
-      if (!fileData) continue;
-      const fileDoc = Automerge.load<FileDoc>(fileData);
-      const content = getContent(fileDoc);
-      entries.push({
-        path: this.prefixPath(filePath),
-        mode: "100644",
-        type: "blob",
-        content,
-      });
-    }
-
-    return entries;
   }
 
   private async getFileContent(

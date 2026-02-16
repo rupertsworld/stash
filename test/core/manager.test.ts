@@ -99,14 +99,13 @@ describe("StashManager", () => {
   it("should sync all stashes", async () => {
     const syncCalls: string[] = [];
     const mockProvider: SyncProvider = {
-      async sync(docs) {
+      async fetch() {
         syncCalls.push("synced");
-        return docs;
+        return new Map();
       },
-      async exists() {
-        return true;
-      },
+      async push(_docs, _files) {},
       async create() {},
+      async delete() {},
     };
 
     const manager = await StashManager.load(tmpDir);
@@ -136,13 +135,12 @@ describe("StashManager", () => {
 
     const manager1 = await StashManager.load(tmpDir);
     const mockProvider: SyncProvider = {
-      async sync(docs) {
-        return docs;
+      async fetch() {
+        return new Map();
       },
-      async exists() {
-        return true;
-      },
+      async push(_docs, _files) {},
       async create() {},
+      async delete() {},
     };
     const stash = await manager1.create(
       "test",

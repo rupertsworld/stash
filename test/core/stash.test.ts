@@ -145,14 +145,16 @@ describe("Stash", () => {
   });
 
   it("should sync with a provider", async () => {
+    let stored = new Map<string, Uint8Array>();
     const mockProvider: SyncProvider = {
-      async sync(docs) {
-        return docs;
+      async fetch() {
+        return new Map(stored);
       },
-      async exists() {
-        return true;
+      async push(docs, _files) {
+        stored = new Map(docs);
       },
       async create() {},
+      async delete() {},
     };
 
     const stash = Stash.create(
@@ -174,14 +176,16 @@ describe("Stash", () => {
     const origWarn = console.warn;
     console.warn = (msg: string) => warnSpy.push(msg);
 
+    let stored = new Map<string, Uint8Array>();
     const mockProvider: SyncProvider = {
-      async sync(docs) {
-        return docs;
+      async fetch() {
+        return new Map(stored);
       },
-      async exists() {
-        return true;
+      async push(docs, _files) {
+        stored = new Map(docs);
       },
       async create() {},
+      async delete() {},
     };
 
     const stash = Stash.create(
@@ -284,13 +288,11 @@ describe("Stash", () => {
     it("should schedule sync after mutation", async () => {
       let syncCalled = false;
       const mockProvider: SyncProvider = {
-        async sync(docs) {
+        async fetch() {
           syncCalled = true;
-          return docs;
+          return new Map();
         },
-        async exists() {
-          return true;
-        },
+        async push(_docs, _files) {},
         async create() {},
         async delete() {},
       };
@@ -313,19 +315,17 @@ describe("Stash", () => {
     });
 
     it("should report isSyncing() during sync", async () => {
-      let resolveSync: () => void;
-      const syncPromise = new Promise<void>((r) => {
-        resolveSync = r;
+      let resolveFetch: () => void;
+      const fetchPromise = new Promise<void>((r) => {
+        resolveFetch = r;
       });
 
       const mockProvider: SyncProvider = {
-        async sync(docs) {
-          await syncPromise;
-          return docs;
+        async fetch() {
+          await fetchPromise;
+          return new Map();
         },
-        async exists() {
-          return true;
-        },
+        async push(_docs, _files) {},
         async create() {},
         async delete() {},
       };
@@ -347,7 +347,7 @@ describe("Stash", () => {
 
       expect(stash.isSyncing()).toBe(true);
 
-      resolveSync!();
+      resolveFetch!();
       await syncOp;
 
       expect(stash.isSyncing()).toBe(false);
@@ -355,20 +355,18 @@ describe("Stash", () => {
 
     it("should skip concurrent sync calls", async () => {
       let syncCount = 0;
-      let resolveSync: () => void;
-      const syncPromise = new Promise<void>((r) => {
-        resolveSync = r;
+      let resolveFetch: () => void;
+      const fetchPromise = new Promise<void>((r) => {
+        resolveFetch = r;
       });
 
       const mockProvider: SyncProvider = {
-        async sync(docs) {
+        async fetch() {
           syncCount++;
-          await syncPromise;
-          return docs;
+          await fetchPromise;
+          return new Map();
         },
-        async exists() {
-          return true;
-        },
+        async push(_docs, _files) {},
         async create() {},
         async delete() {},
       };
@@ -392,7 +390,7 @@ describe("Stash", () => {
       expect(stash.isSyncing()).toBe(true);
       expect(syncCount).toBe(1);
 
-      resolveSync!();
+      resolveFetch!();
       await sync1;
 
       expect(syncCount).toBe(1);

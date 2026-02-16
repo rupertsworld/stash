@@ -10,6 +10,7 @@ import {
   moveFile as moveStructureFile,
   getEntry,
   listPaths,
+  isDeleted,
   type StructureDoc,
 } from "./structure.js";
 import {
@@ -43,6 +44,8 @@ export class Stash {
   private syncTimeout: ReturnType<typeof setTimeout> | null = null;
   private syncing = false;
   private static SYNC_DEBOUNCE_MS = 2000;
+  // Known paths: tracks files we've seen locally (for distinguishing new vs deleted)
+  private knownPaths: Set<string> = new Set();
 
   constructor(
     name: string,
@@ -135,7 +138,9 @@ export class Stash {
       // docs dir might not exist yet
     }
 
-    return new Stash(name, stashPath, structureDoc, fileDocs, meta, actorId, provider);
+    const stash = new Stash(name, stashPath, structureDoc, fileDocs, meta, actorId, provider);
+    await stash.loadKnownPaths();
+    return stash;
   }
 
   // --- File enumeration ---
@@ -167,26 +172,34 @@ export class Stash {
   // --- Read content ---
   read(filePath: string): string {
     const entry = getEntry(this.structureDoc, filePath);
-    if (!entry) throw new Error(`File not found: ${filePath}`);
+    if (!entry || entry.deleted) throw new Error(`File not found: ${filePath}`);
     const doc = this.fileDocs.get(entry.docId);
     if (!doc) throw new Error(`File not found: ${filePath}`);
     return getContent(doc);
   }
 
+  isDeleted(filePath: string): boolean {
+    return isDeleted(this.structureDoc, filePath);
+  }
+
   // --- Write operations ---
   write(filePath: string, content: string): void {
     const entry = getEntry(this.structureDoc, filePath);
-    if (entry) {
+    const hexActorId = this.getHexActorId();
+
+    if (entry && !entry.deleted) {
+      // Update existing file
       const doc = this.fileDocs.get(entry.docId);
       if (doc) {
         this.fileDocs.set(entry.docId, setContent(doc, content));
       }
     } else {
-      const hexActorId = this.getHexActorId();
+      // Create new file (or resurrect deleted path with new docId)
       const result = addFile(this.structureDoc, filePath);
       this.structureDoc = result.doc;
       this.fileDocs.set(result.docId, createFileDoc(content, hexActorId));
     }
+    this.knownPaths.add(filePath);
     this.scheduleBackgroundSave();
   }
 
@@ -220,9 +233,10 @@ export class Stash {
 
   delete(filePath: string): void {
     const entry = getEntry(this.structureDoc, filePath);
-    if (!entry) throw new Error(`File not found: ${filePath}`);
+    if (!entry || entry.deleted) throw new Error(`File not found: ${filePath}`);
     this.structureDoc = removeFile(this.structureDoc, filePath);
-    this.fileDocs.delete(entry.docId);
+    // Keep the doc in fileDocs for now - needed for "content wins" conflict resolution
+    // It will be garbage collected after sync confirms deletion
     this.scheduleBackgroundSave();
   }
 
@@ -323,6 +337,7 @@ export class Stash {
   }
 
   private async doSync(): Promise<void> {
+    // Fix dangling refs before sync
     for (const [filePath, entry] of Object.entries(this.structureDoc.files)) {
       if (!this.fileDocs.has(entry.docId)) {
         console.warn(`Creating empty doc for dangling ref: ${filePath}`);
@@ -331,30 +346,225 @@ export class Stash {
       }
     }
 
-    const localDocs = new Map<string, Uint8Array>();
-    localDocs.set("structure", Automerge.save(this.structureDoc));
-    for (const [docId, fileDoc] of this.fileDocs) {
-      localDocs.set(docId, Automerge.save(fileDoc));
-    }
+    // 1. Fetch remote docs
+    const remoteDocs = await withRetry(() => this.provider!.fetch());
 
-    const mergedDocs = await withRetry(() => this.provider!.sync(localDocs));
+    // 2. Merge remote into local
+    const merged = this.mergeWithRemote(remoteDocs);
 
-    this.structureDoc = Automerge.load<StructureDoc>(
-      mergedDocs.get("structure")!,
-    );
+    // 3. Build files map (complete desired state)
+    const files = new Map<string, string | Buffer>();
+    for (const [filePath, entry] of Object.entries(this.structureDoc.files)) {
+      if (entry.deleted) continue;
 
-    const referencedDocIds = new Set(
-      Object.values(this.structureDoc.files).map((f) => f.docId),
-    );
+      const doc = this.fileDocs.get(entry.docId);
+      if (!doc) continue;
 
-    this.fileDocs.clear();
-    for (const [docId, data] of mergedDocs) {
-      if (docId !== "structure" && referencedDocIds.has(docId)) {
-        this.fileDocs.set(docId, Automerge.load<FileDoc>(data));
+      if (doc.type === "text") {
+        files.set(filePath, getContent(doc));
+      } else if (doc.type === "binary") {
+        // For binary files, read from blob storage
+        const blobPath = path.join(this.path, ".stash", "blobs", `${doc.hash}.bin`);
+        try {
+          const content = await import("node:fs/promises").then(fs => fs.readFile(blobPath));
+          files.set(filePath, content);
+        } catch {
+          // Blob not found, skip
+        }
       }
     }
 
+    // 4. Push merged docs + files to remote
+    await withRetry(() => this.provider!.push(merged, files));
+
     await this.save();
+  }
+
+  /**
+   * Merge remote docs into local state.
+   * Handles the "fresh join" case where local has no shared history with remote.
+   */
+  private mergeWithRemote(remoteDocs: Map<string, Uint8Array>): Map<string, Uint8Array> {
+    const merged = new Map<string, Uint8Array>();
+
+    // Check if this is a "fresh join" - local structure has no files
+    const localIsEmpty = Object.keys(this.structureDoc.files).length === 0;
+    const remoteStructureData = remoteDocs.get("structure");
+
+    if (localIsEmpty && remoteStructureData) {
+      // Fresh join: adopt remote state entirely
+      this.structureDoc = Automerge.load<StructureDoc>(remoteStructureData);
+      merged.set("structure", remoteStructureData);
+
+      // Load all remote file docs and mark paths as known
+      const referencedDocIds = new Set(
+        Object.values(this.structureDoc.files).map((f) => f.docId),
+      );
+      this.fileDocs.clear();
+      for (const [docId, data] of remoteDocs) {
+        if (docId !== "structure" && referencedDocIds.has(docId)) {
+          this.fileDocs.set(docId, Automerge.load<FileDoc>(data));
+          merged.set(docId, data);
+        }
+      }
+
+      // Mark all adopted paths as known (so deletions propagate correctly)
+      for (const filePath of listPaths(this.structureDoc)) {
+        this.knownPaths.add(filePath);
+      }
+    } else {
+      // Normal merge: combine local and remote changes
+      // Snapshot local files that have DIFFERENT docIds than remote
+      // (these are new files at existing paths that should survive)
+      const localNewFiles = new Map<string, { docId: string; content: string }>();
+      if (remoteStructureData) {
+        const remoteStructure = Automerge.load<StructureDoc>(remoteStructureData);
+        for (const [filePath, localEntry] of Object.entries(this.structureDoc.files)) {
+          if (localEntry.deleted) continue;
+          const remoteEntry = remoteStructure.files[filePath];
+          // If local has different docId than remote (or remote is tombstoned), it's a new file
+          if (remoteEntry && remoteEntry.docId !== localEntry.docId) {
+            const doc = this.fileDocs.get(localEntry.docId);
+            if (doc && doc.type === "text") {
+              localNewFiles.set(filePath, {
+                docId: localEntry.docId,
+                content: getContent(doc),
+              });
+            }
+          }
+        }
+      }
+
+      // Merge structure doc
+      if (remoteStructureData) {
+        const remoteStructure = Automerge.load<StructureDoc>(remoteStructureData);
+        this.structureDoc = Automerge.merge(this.structureDoc, remoteStructure);
+      }
+
+      // Restore new files that got clobbered by merge
+      for (const [filePath, local] of localNewFiles) {
+        const result = addFile(this.structureDoc, filePath, local.docId);
+        this.structureDoc = result.doc;
+      }
+
+      merged.set("structure", Automerge.save(this.structureDoc));
+
+      // Get all referenced doc IDs from merged structure
+      const referencedDocIds = new Set(
+        Object.values(this.structureDoc.files).map((f) => f.docId),
+      );
+
+      // Merge file docs
+      for (const docId of referencedDocIds) {
+        const localDoc = this.fileDocs.get(docId);
+        const remoteData = remoteDocs.get(docId);
+
+        if (localDoc && remoteData) {
+          // Both exist - merge
+          const remoteDoc = Automerge.load<FileDoc>(remoteData);
+          const mergedDoc = Automerge.merge(localDoc, remoteDoc);
+          this.fileDocs.set(docId, mergedDoc);
+          merged.set(docId, Automerge.save(mergedDoc));
+        } else if (localDoc) {
+          // Local only
+          merged.set(docId, Automerge.save(localDoc));
+        } else if (remoteData) {
+          // Remote only
+          this.fileDocs.set(docId, Automerge.load<FileDoc>(remoteData));
+          merged.set(docId, remoteData);
+        }
+      }
+
+      // Clean up unreferenced local docs
+      for (const docId of this.fileDocs.keys()) {
+        if (!referencedDocIds.has(docId)) {
+          this.fileDocs.delete(docId);
+        }
+      }
+
+      // Mark all non-deleted paths as known (so deletions propagate correctly)
+      for (const filePath of listPaths(this.structureDoc)) {
+        this.knownPaths.add(filePath);
+      }
+
+      // Content wins: if local made changes to a file that remote deleted,
+      // clear the tombstone (local content wins)
+      this.applyContentWinsRule(remoteDocs);
+      merged.set("structure", Automerge.save(this.structureDoc));
+    }
+
+    return merged;
+  }
+
+  /**
+   * Apply "content wins" rule: if a file has tombstone from remote but
+   * local made content changes, clear the tombstone.
+   */
+  private applyContentWinsRule(remoteDocs: Map<string, Uint8Array>): void {
+    for (const [filePath, entry] of Object.entries(this.structureDoc.files)) {
+      if (!entry.deleted) continue;
+
+      // Get local and remote content
+      const localDoc = this.fileDocs.get(entry.docId);
+      if (!localDoc || localDoc.type !== "text") continue;
+
+      const localContent = getContent(localDoc);
+
+      // Get remote content (if any)
+      const remoteData = remoteDocs.get(entry.docId);
+      let remoteContent = "";
+      if (remoteData) {
+        const remoteDoc = Automerge.load<FileDoc>(remoteData);
+        if (remoteDoc.type === "text") {
+          remoteContent = getContent(remoteDoc);
+        }
+      }
+
+      // If local content differs from remote, local made changes - content wins
+      if (localContent !== remoteContent && localContent.length > 0) {
+        this.structureDoc = Automerge.change(this.structureDoc, (d) => {
+          delete (d.files[filePath] as { deleted?: boolean }).deleted;
+        });
+      }
+    }
+  }
+
+  // --- Known Paths (local only, not synced) ---
+  isKnownPath(filePath: string): boolean {
+    return this.knownPaths.has(filePath);
+  }
+
+  addKnownPath(filePath: string): void {
+    this.knownPaths.add(filePath);
+  }
+
+  removeKnownPath(filePath: string): void {
+    this.knownPaths.delete(filePath);
+  }
+
+  clearKnownPaths(): void {
+    this.knownPaths.clear();
+  }
+
+  private async loadKnownPaths(): Promise<void> {
+    try {
+      const data = await fs.readFile(
+        path.join(this.path, ".stash", "known-paths.json"),
+        "utf-8",
+      );
+      const parsed = JSON.parse(data);
+      this.knownPaths = new Set(parsed.paths || []);
+    } catch {
+      // File doesn't exist or is corrupted - start fresh
+      this.knownPaths = new Set();
+    }
+  }
+
+  private async saveKnownPaths(): Promise<void> {
+    await atomicWrite(
+      path.join(this.path, ".stash", "known-paths.json"),
+      JSON.stringify({ paths: [...this.knownPaths] }, null, 2) + "\n",
+    );
   }
 
   // --- Persistence ---
@@ -379,6 +589,8 @@ export class Stash {
         Automerge.save(doc),
       );
     }
+
+    await this.saveKnownPaths();
   }
 
   scheduleSync(): void {

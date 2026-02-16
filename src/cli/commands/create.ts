@@ -37,21 +37,27 @@ export async function createStash(
 
       provider = new GitHubProvider(token, parsed.owner, parsed.repo, parsed.pathPrefix);
 
-      const remoteExists = await provider.exists();
-      if (!remoteExists) {
-        console.error(`Repository ${parsed.owner}/${parsed.repo} does not exist.`);
-        console.error("Create the repository first, or use 'stash connect' to join an existing stash.");
-        process.exit(1);
+      // Check remote state using fetch()
+      let remoteDocs: Map<string, Uint8Array>;
+      try {
+        remoteDocs = await provider.fetch();
+      } catch (err) {
+        const error = err as Error & { status?: number };
+        if (error.status === 404) {
+          console.error(`Repository ${parsed.owner}/${parsed.repo} does not exist.`);
+          console.error("Create the repository on GitHub first.");
+          process.exit(1);
+        }
+        throw err;
       }
 
-      const isEmpty = await provider.isEmpty();
-      if (!isEmpty) {
-        console.error(`Repository ${parsed.owner}/${parsed.repo} is not empty.`);
+      if (remoteDocs.size > 0) {
+        console.error(`Repository ${parsed.owner}/${parsed.repo} already has stash data.`);
         console.error("Use 'stash connect' to join an existing stash.");
         process.exit(1);
       }
 
-      // Initialize empty repo with first commit
+      // Initialize empty repo with .stash structure
       console.log("Initializing repository...");
       await provider.create();
 
@@ -87,21 +93,27 @@ export async function createStash(
       const pathPrefix = pathParts.join("/");
       provider = new GitHubProvider(token, owner, repo, pathPrefix);
 
-      const remoteExists = await provider.exists();
-      if (!remoteExists) {
-        console.error(`Repository ${owner}/${repo} does not exist.`);
-        console.error("Create the repository first, or use 'stash connect' to join an existing stash.");
-        process.exit(1);
+      // Check remote state using fetch()
+      let remoteDocs: Map<string, Uint8Array>;
+      try {
+        remoteDocs = await provider.fetch();
+      } catch (err) {
+        const error = err as Error & { status?: number };
+        if (error.status === 404) {
+          console.error(`Repository ${owner}/${repo} does not exist.`);
+          console.error("Create the repository on GitHub first.");
+          process.exit(1);
+        }
+        throw err;
       }
 
-      const isEmpty = await provider.isEmpty();
-      if (!isEmpty) {
-        console.error(`Repository ${owner}/${repo} is not empty.`);
+      if (remoteDocs.size > 0) {
+        console.error(`Repository ${owner}/${repo} already has stash data.`);
         console.error("Use 'stash connect' to join an existing stash.");
         process.exit(1);
       }
 
-      // Initialize empty repo with first commit
+      // Initialize empty repo with .stash structure
       console.log("Initializing repository...");
       await provider.create();
 

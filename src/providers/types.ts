@@ -1,28 +1,31 @@
 /**
  * SyncProvider interface for syncing stash documents with remote storage.
  *
- * The provider owns the entire sync process: fetching, merging, pushing,
- * and rendering. Stash just hands over all documents and gets merged state back.
+ * The provider is a transport layer - it fetches and pushes documents.
+ * Merge logic is handled by the Stash, not the provider.
  */
 export interface SyncProvider {
   /**
-   * Sync all documents with remote storage.
+   * Fetch all documents from remote storage.
    *
-   * @param docs - Map of document ID to Automerge binary data.
-   *               "structure" key is the structure doc, others are file docs (ULID keys).
-   * @returns Map of merged documents. Must include all docs from input,
-   *          plus any remote-only docs discovered during sync.
-   * @throws SyncError on network/auth failures (caller handles retry)
+   * @returns Map of document ID to Automerge binary data.
+   *          "structure" key is the structure doc, others are file docs (ULID keys).
+   *          Returns empty map if remote has no docs yet.
    */
-  sync(docs: Map<string, Uint8Array>): Promise<Map<string, Uint8Array>>;
+  fetch(): Promise<Map<string, Uint8Array>>;
 
   /**
-   * Check if remote storage exists.
+   * Push to remote storage.
+   *
+   * @param docs - Automerge blobs to store in .stash/ folder
+   * @param files - Complete desired file state. Provider makes remote match this.
+   *                Files not in this map should be deleted from remote.
    */
-  exists(): Promise<boolean>;
+  push(docs: Map<string, Uint8Array>, files: Map<string, string | Buffer>): Promise<void>;
 
   /**
-   * Create remote storage.
+   * Create remote storage. Idempotent - no-op if already exists.
+   * Throws only on actual errors (permissions, quota, etc.)
    */
   create(): Promise<void>;
 
