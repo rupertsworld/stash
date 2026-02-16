@@ -215,15 +215,17 @@ This reduces N+2 sequential calls to 3 sequential + N parallel. The tree call di
 
 `setContent` calls `d.content.deleteAt(0, len)` then `d.content.insertAt(0, ...content.split(""))`, spreading every character as a separate argument. For a 10KB file, that's 10,000 individual Automerge operations in a single change, inflating document history.
 
-**Fix**: Use `Automerge.splice` (available in Automerge 2.x), which handles text efficiently as a batch:
+**Fix**: Use `splice` from `@automerge/automerge/next` (the `next` subpath export provides `splice` which isn't in the stable API of 2.2.8). Keep `Automerge.Text` type to avoid a breaking migration:
 
 ```typescript
+import { splice } from "@automerge/automerge/next";
+
 export function setContent(
   doc: Automerge.Doc<FileDoc>,
   content: string,
 ): Automerge.Doc<FileDoc> {
   return Automerge.change(doc, (d) => {
-    Automerge.splice(d, ["content"], 0, d.content.length, content);
+    splice(d, ["content"], 0, d.content.length, content);
   });
 }
 
@@ -239,38 +241,7 @@ export function applyPatch(
 }
 ```
 
-**Migration concern**: `Automerge.splice` works with Automerge's native string type, not the deprecated `Automerge.Text` class. Changing `FileDoc.content` from `Automerge.Text` to `string` is a breaking change for existing `.automerge` files on disk.
-
-Migration strategy -- convert on load in `Stash.load()`:
-
-```typescript
-// After loading each FileDoc, migrate Text → string if needed
-for (const [docId, doc] of fileDocs) {
-  if (doc.content instanceof Automerge.Text) {
-    const text = doc.content.toString();
-    fileDocs.set(docId, createFileDoc(text, hexActorId));
-  }
-}
-```
-
-Then update `createFileDoc` to use a plain string and update the `FileDoc` interface:
-
-```typescript
-export interface FileDoc {
-  content: string;
-}
-
-export function createFileDoc(content: string = "", actorId?: string): Automerge.Doc<FileDoc> {
-  return Automerge.from<FileDoc>(
-    { content },
-    actorId ? { actor: actorId as Automerge.ActorId } : undefined,
-  );
-}
-
-export function getContent(doc: Automerge.Doc<FileDoc>): string {
-  return doc.content;
-}
-```
+**Implementation note**: `splice` from `@automerge/automerge/next` works with `Automerge.Text` objects, so no breaking migration is needed. The `FileDoc` interface and `createFileDoc` remain unchanged -- only `setContent` and `applyPatch` are updated to use `splice` instead of character-by-character `insertAt`.
 
 ---
 

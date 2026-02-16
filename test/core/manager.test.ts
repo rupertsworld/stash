@@ -90,14 +90,16 @@ describe("StashManager", () => {
   it("should sync all stashes", async () => {
     const syncCalls: string[] = [];
     const mockProvider: SyncProvider = {
-      async sync(docs) {
+      async fetch() {
         syncCalls.push("synced");
-        return docs;
+        return new Map();
       },
+      async push() {},
       async exists() {
         return true;
       },
       async create() {},
+      async delete() {},
     };
 
     const manager = await StashManager.load(tmpDir);
@@ -119,13 +121,11 @@ describe("StashManager", () => {
     // Create a stash with github provider type
     const manager1 = await StashManager.load(tmpDir);
     const mockProvider: SyncProvider = {
-      async sync(docs) {
-        return docs;
-      },
-      async exists() {
-        return true;
-      },
+      async fetch() { return new Map(); },
+      async push() {},
+      async exists() { return true; },
       async create() {},
+      async delete() {},
     };
     const stash = await manager1.create(
       "test",

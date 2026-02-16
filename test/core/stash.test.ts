@@ -6,6 +6,17 @@ import * as Automerge from "@automerge/automerge";
 import { Stash } from "../../src/core/stash.js";
 import type { SyncProvider } from "../../src/providers/types.js";
 
+function createMockProvider(overrides: Partial<SyncProvider> = {}): SyncProvider {
+  return {
+    async fetch() { return new Map(); },
+    async push() {},
+    async exists() { return true; },
+    async create() {},
+    async delete() {},
+    ...overrides,
+  };
+}
+
 describe("Stash", () => {
   let tmpDir: string;
 
@@ -142,16 +153,7 @@ describe("Stash", () => {
   });
 
   it("should sync with a provider", async () => {
-    // Create a mock provider that returns what it receives
-    const mockProvider: SyncProvider = {
-      async sync(docs) {
-        return docs;
-      },
-      async exists() {
-        return true;
-      },
-      async create() {},
-    };
+    const mockProvider = createMockProvider();
 
     const stash = Stash.create("test", tmpDir, mockProvider, "mock", "mock:test");
     stash.write("file.md", "content");
@@ -163,28 +165,16 @@ describe("Stash", () => {
   });
 
   it("should handle dangling refs during sync", async () => {
-    // Mock provider that adds a new file reference to structure
-    // but doesn't provide the file doc (simulating dangling ref)
     const warnSpy: string[] = [];
     const origWarn = console.warn;
     console.warn = (msg: string) => warnSpy.push(msg);
 
-    const mockProvider: SyncProvider = {
-      async sync(docs) {
-        return docs;
-      },
-      async exists() {
-        return true;
-      },
-      async create() {},
-    };
+    const mockProvider = createMockProvider();
 
     const stash = Stash.create("test", tmpDir, mockProvider, "mock", "mock:test");
     stash.write("file.md", "content");
     await stash.flush();
 
-    // Manually create a dangling ref scenario by deleting the file doc
-    // We'll test this through sync's pre-sync check
     await stash.sync();
     console.warn = origWarn;
 
@@ -249,44 +239,36 @@ describe("Stash", () => {
     });
 
     it("should schedule sync after mutation", async () => {
-      let syncCalled = false;
-      const mockProvider: SyncProvider = {
-        async sync(docs) {
-          syncCalled = true;
-          return docs;
+      let fetchCalled = false;
+      const mockProvider = createMockProvider({
+        async fetch() {
+          fetchCalled = true;
+          return new Map();
         },
-        async exists() {
-          return true;
-        },
-        async create() {},
-        async delete() {},
-      };
+      });
 
       const stash = Stash.create("test", tmpDir, mockProvider, "mock", "mock:test");
       stash.write("file.md", "content");
       await stash.flush();
 
       // Sync should be scheduled (debounced)
-      expect(syncCalled).toBe(false);
+      expect(fetchCalled).toBe(false);
 
       // Wait for debounce + sync
       await new Promise((r) => setTimeout(r, 2500));
-      expect(syncCalled).toBe(true);
+      expect(fetchCalled).toBe(true);
     });
 
     it("should report isSyncing() during sync", async () => {
       let resolveSync: () => void;
       const syncPromise = new Promise<void>((r) => { resolveSync = r; });
 
-      const mockProvider: SyncProvider = {
-        async sync(docs) {
+      const mockProvider = createMockProvider({
+        async fetch() {
           await syncPromise;
-          return docs;
+          return new Map();
         },
-        async exists() { return true; },
-        async create() {},
-        async delete() {},
-      };
+      });
 
       const stash = Stash.create("test", tmpDir, mockProvider, "mock", "mock:test");
       stash.write("file.md", "content");
@@ -307,20 +289,17 @@ describe("Stash", () => {
     });
 
     it("should skip concurrent sync calls", async () => {
-      let syncCount = 0;
+      let fetchCount = 0;
       let resolveSync: () => void;
       const syncPromise = new Promise<void>((r) => { resolveSync = r; });
 
-      const mockProvider: SyncProvider = {
-        async sync(docs) {
-          syncCount++;
+      const mockProvider = createMockProvider({
+        async fetch() {
+          fetchCount++;
           await syncPromise;
-          return docs;
+          return new Map();
         },
-        async exists() { return true; },
-        async create() {},
-        async delete() {},
-      };
+      });
 
       const stash = Stash.create("test", tmpDir, mockProvider, "mock", "mock:test");
       stash.write("file.md", "content");
@@ -338,13 +317,13 @@ describe("Stash", () => {
 
       // First is still running
       expect(stash.isSyncing()).toBe(true);
-      expect(syncCount).toBe(1);
+      expect(fetchCount).toBe(1);
 
       // Complete first sync
       resolveSync!();
       await sync1;
 
-      expect(syncCount).toBe(1); // Only one sync actually ran
+      expect(fetchCount).toBe(1); // Only one sync actually ran
     });
   });
 });

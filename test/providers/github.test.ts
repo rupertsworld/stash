@@ -17,6 +17,8 @@ vi.mock("octokit", () => {
         git: {
           getRef: vi.fn(),
           getCommit: vi.fn(),
+          getTree: vi.fn(),
+          getBlob: vi.fn(),
           createTree: vi.fn(),
           createCommit: vi.fn(),
           updateRef: vi.fn(),
@@ -54,162 +56,160 @@ describe("GitHubProvider", () => {
     ].value;
   });
 
-  it("should sync with empty remote (first push)", async () => {
-    const localDocs = createTestDocs();
+  describe("fetch", () => {
+    it("should return empty map when remote is empty (404)", async () => {
+      mockOctokit.rest.git.getRef.mockRejectedValue(
+        Object.assign(new Error("Not Found"), { status: 404 }),
+      );
 
-    // Mock: remote is empty (404s)
-    mockOctokit.rest.repos.getContent.mockRejectedValue(
-      Object.assign(new Error("Not Found"), { status: 404 }),
-    );
-    mockOctokit.rest.git.getRef.mockRejectedValue(
-      Object.assign(new Error("Not Found"), { status: 404 }),
-    );
-    mockOctokit.rest.git.createBlob.mockResolvedValue({
-      data: { sha: "blob-sha" },
+      const result = await provider.fetch();
+      expect(result.size).toBe(0);
     });
-    mockOctokit.rest.git.createTree.mockResolvedValue({
-      data: { sha: "tree-sha" },
-    });
-    mockOctokit.rest.git.createCommit.mockResolvedValue({
-      data: { sha: "commit-sha" },
-    });
-    mockOctokit.rest.git.createRef.mockResolvedValue({ data: {} });
 
-    const result = await provider.sync(localDocs);
+    it("should fetch docs using tree API and parallel blob fetches", async () => {
+      const structureDoc = createStructureDoc();
+      const { doc, docId } = addFile(structureDoc, "test.md");
+      const fileDoc = createFileDoc("Test");
 
-    expect(result.size).toBe(localDocs.size);
-    expect(result.has("structure")).toBe(true);
-    expect(mockOctokit.rest.git.createRef).toHaveBeenCalled();
-  });
+      const structureBase64 = Buffer.from(Automerge.save(doc)).toString("base64");
+      const fileBase64 = Buffer.from(Automerge.save(fileDoc)).toString("base64");
 
-  it("should fetch and merge remote docs", async () => {
-    // Create local docs
-    let localStructure = createStructureDoc();
-    const r1 = addFile(localStructure, "local.md");
-    localStructure = r1.doc;
-    const localFile = createFileDoc("Local content");
-
-    const localDocs = new Map<string, Uint8Array>();
-    localDocs.set("structure", Automerge.save(localStructure));
-    localDocs.set(r1.docId, Automerge.save(localFile));
-
-    // Create remote docs (same structure base but different file)
-    let remoteStructure = createStructureDoc();
-    const r2 = addFile(remoteStructure, "remote.md");
-    remoteStructure = r2.doc;
-    const remoteFile = createFileDoc("Remote content");
-
-    const remoteStructureBase64 = Buffer.from(
-      Automerge.save(remoteStructure),
-    ).toString("base64");
-    const remoteFileBase64 = Buffer.from(Automerge.save(remoteFile)).toString(
-      "base64",
-    );
-
-    // Mock fetch
-    mockOctokit.rest.repos.getContent.mockImplementation(
-      async ({ path }: { path: string }) => {
-        if (path === ".stash/structure.automerge") {
-          return { data: { content: remoteStructureBase64 } };
+      mockOctokit.rest.git.getRef.mockResolvedValue({
+        data: { object: { sha: "ref-sha" } },
+      });
+      mockOctokit.rest.git.getCommit.mockResolvedValue({
+        data: { tree: { sha: "tree-sha" } },
+      });
+      mockOctokit.rest.git.getTree.mockResolvedValue({
+        data: {
+          tree: [
+            { path: ".stash/structure.automerge", type: "blob", sha: "structure-blob-sha" },
+            { path: `.stash/docs/${docId}.automerge`, type: "blob", sha: "file-blob-sha" },
+            { path: "test.md", type: "blob", sha: "plaintext-sha" },
+          ],
+        },
+      });
+      mockOctokit.rest.git.getBlob.mockImplementation(async ({ file_sha }: { file_sha: string }) => {
+        if (file_sha === "structure-blob-sha") {
+          return { data: { content: structureBase64 } };
         }
-        if (path === ".stash/docs") {
-          return {
-            data: [{ name: `${r2.docId}.automerge` }],
-          };
+        if (file_sha === "file-blob-sha") {
+          return { data: { content: fileBase64 } };
         }
-        if (path === `.stash/docs/${r2.docId}.automerge`) {
-          return { data: { content: remoteFileBase64 } };
-        }
-        throw Object.assign(new Error("Not Found"), { status: 404 });
-      },
-    );
+        throw new Error("Unknown blob");
+      });
 
-    // Mock push
-    mockOctokit.rest.git.getRef.mockResolvedValue({
-      data: { object: { sha: "parent-sha" } },
-    });
-    mockOctokit.rest.git.getCommit.mockResolvedValue({
-      data: { tree: { sha: "base-tree-sha" } },
-    });
-    mockOctokit.rest.git.createBlob.mockResolvedValue({
-      data: { sha: "blob-sha" },
-    });
-    mockOctokit.rest.git.createTree.mockResolvedValue({
-      data: { sha: "tree-sha" },
-    });
-    mockOctokit.rest.git.createCommit.mockResolvedValue({
-      data: { sha: "commit-sha" },
-    });
-    mockOctokit.rest.git.updateRef.mockResolvedValue({ data: {} });
+      const result = await provider.fetch();
+      expect(result.has("structure")).toBe(true);
+      expect(result.has(docId)).toBe(true);
+      expect(result.size).toBe(2); // Only .automerge blobs, not plain text
 
-    const result = await provider.sync(localDocs);
+      // Verify tree API was used (not repos.getContent)
+      expect(mockOctokit.rest.git.getTree).toHaveBeenCalledWith(
+        expect.objectContaining({ recursive: "true" }),
+      );
+      expect(mockOctokit.rest.repos.getContent).not.toHaveBeenCalled();
+    });
 
-    // Should have structure + local file + remote file
-    expect(result.has("structure")).toBe(true);
-    expect(result.has(r1.docId)).toBe(true);
-    expect(result.has(r2.docId)).toBe(true);
+    it("should throw non-retryable SyncError on auth failure", async () => {
+      mockOctokit.rest.git.getRef.mockRejectedValue(
+        Object.assign(new Error("Unauthorized"), { status: 401 }),
+      );
+
+      try {
+        await provider.fetch();
+        expect.fail("Should have thrown");
+      } catch (err) {
+        expect(err).toBeInstanceOf(SyncError);
+        expect((err as SyncError).retryable).toBe(false);
+      }
+    });
+
+    it("should throw retryable SyncError on server failure", async () => {
+      mockOctokit.rest.git.getRef.mockRejectedValue(
+        Object.assign(new Error("Server Error"), { status: 500 }),
+      );
+
+      try {
+        await provider.fetch();
+        expect.fail("Should have thrown");
+      } catch (err) {
+        expect(err).toBeInstanceOf(SyncError);
+        expect((err as SyncError).retryable).toBe(true);
+      }
+    });
   });
 
-  it("should throw non-retryable SyncError on auth failure", async () => {
-    const localDocs = createTestDocs();
+  describe("push", () => {
+    it("should push docs and render plain text files", async () => {
+      const localDocs = createTestDocs();
 
-    mockOctokit.rest.repos.getContent.mockRejectedValue(
-      Object.assign(new Error("Unauthorized"), { status: 401 }),
-    );
+      mockOctokit.rest.git.getRef.mockResolvedValue({
+        data: { object: { sha: "parent-sha" } },
+      });
+      mockOctokit.rest.git.getCommit.mockResolvedValue({
+        data: { tree: { sha: "base-tree-sha" } },
+      });
+      mockOctokit.rest.git.getTree.mockResolvedValue({
+        data: { tree: [] },
+      });
+      mockOctokit.rest.git.createBlob.mockResolvedValue({
+        data: { sha: "blob-sha" },
+      });
+      mockOctokit.rest.git.createTree.mockResolvedValue({
+        data: { sha: "tree-sha" },
+      });
+      mockOctokit.rest.git.createCommit.mockResolvedValue({
+        data: { sha: "commit-sha" },
+      });
+      mockOctokit.rest.git.updateRef.mockResolvedValue({ data: {} });
 
-    try {
-      await provider.sync(localDocs);
-      expect.fail("Should have thrown");
-    } catch (err) {
-      expect(err).toBeInstanceOf(SyncError);
-      expect((err as SyncError).retryable).toBe(false);
-    }
-  });
+      await provider.push(localDocs);
 
-  it("should throw retryable SyncError on network failure", async () => {
-    const localDocs = createTestDocs();
-
-    mockOctokit.rest.repos.getContent.mockRejectedValue(
-      Object.assign(new Error("Server Error"), { status: 500 }),
-    );
-
-    try {
-      await provider.sync(localDocs);
-      expect.fail("Should have thrown");
-    } catch (err) {
-      expect(err).toBeInstanceOf(SyncError);
-      expect((err as SyncError).retryable).toBe(true);
-    }
-  });
-
-  it("should render plain text files in push", async () => {
-    const localDocs = createTestDocs();
-
-    mockOctokit.rest.repos.getContent.mockRejectedValue(
-      Object.assign(new Error("Not Found"), { status: 404 }),
-    );
-    mockOctokit.rest.git.getRef.mockResolvedValue({
-      data: { object: { sha: "parent-sha" } },
+      // Verify createTree was called with rendered plain text files
+      const treeCall = mockOctokit.rest.git.createTree.mock.calls[0][0];
+      const paths = treeCall.tree.map((e: any) => e.path);
+      expect(paths).toContain("hello.md");
+      expect(paths).toContain(".stash/structure.automerge");
     });
-    mockOctokit.rest.git.getCommit.mockResolvedValue({
-      data: { tree: { sha: "base-tree-sha" } },
-    });
-    mockOctokit.rest.git.createBlob.mockResolvedValue({
-      data: { sha: "blob-sha" },
-    });
-    mockOctokit.rest.git.createTree.mockResolvedValue({
-      data: { sha: "tree-sha" },
-    });
-    mockOctokit.rest.git.createCommit.mockResolvedValue({
-      data: { sha: "commit-sha" },
-    });
-    mockOctokit.rest.git.updateRef.mockResolvedValue({ data: {} });
 
-    await provider.sync(localDocs);
+    it("should create initial ref when no commits exist", async () => {
+      const localDocs = createTestDocs();
 
-    // Verify createTree was called with rendered plain text files
-    const treeCall = mockOctokit.rest.git.createTree.mock.calls[0][0];
-    const paths = treeCall.tree.map((e: any) => e.path);
-    expect(paths).toContain("hello.md");
+      mockOctokit.rest.git.getRef.mockRejectedValue(
+        Object.assign(new Error("Not Found"), { status: 404 }),
+      );
+      mockOctokit.rest.git.createBlob.mockResolvedValue({
+        data: { sha: "blob-sha" },
+      });
+      mockOctokit.rest.git.createTree.mockResolvedValue({
+        data: { sha: "tree-sha" },
+      });
+      mockOctokit.rest.git.createCommit.mockResolvedValue({
+        data: { sha: "commit-sha" },
+      });
+      mockOctokit.rest.git.createRef.mockResolvedValue({ data: {} });
+
+      await provider.push(localDocs);
+
+      expect(mockOctokit.rest.git.createRef).toHaveBeenCalled();
+      expect(mockOctokit.rest.git.updateRef).not.toHaveBeenCalled();
+    });
+
+    it("should throw non-retryable SyncError on auth failure", async () => {
+      const localDocs = createTestDocs();
+
+      mockOctokit.rest.git.createBlob.mockRejectedValue(
+        Object.assign(new Error("Forbidden"), { status: 403 }),
+      );
+
+      try {
+        await provider.push(localDocs);
+        expect.fail("Should have thrown");
+      } catch (err) {
+        expect(err).toBeInstanceOf(SyncError);
+        expect((err as SyncError).retryable).toBe(false);
+      }
+    });
   });
 });

@@ -79,207 +79,190 @@ export class GitHubProvider implements SyncProvider {
     });
   }
 
-  async sync(
-    localDocs: Map<string, Uint8Array>,
-  ): Promise<Map<string, Uint8Array>> {
-    try {
-      // 1. Fetch remote docs
-      const remoteDocs = await this.fetch();
-
-      // 2. Get remote file paths (for deletion tracking)
-      const remoteFilePaths = new Set<string>();
-      const remoteStructure = remoteDocs.get("structure");
-      if (remoteStructure) {
-        const remoteStructureDoc = Automerge.load<StructureDoc>(remoteStructure);
-        for (const filePath of Object.keys(remoteStructureDoc.files)) {
-          remoteFilePaths.add(filePath);
-        }
-      }
-
-      // 3. Merge all locally
-      const merged = new Map<string, Uint8Array>();
-      for (const [docId, localData] of localDocs) {
-        let doc = Automerge.load<unknown>(localData);
-        const remoteData = remoteDocs.get(docId);
-        if (remoteData) {
-          const remoteDoc = Automerge.load<unknown>(remoteData);
-          doc = Automerge.merge(doc, remoteDoc as typeof doc);
-        }
-        merged.set(docId, Automerge.save(doc));
-      }
-
-      // 4. Include remote-only docs
-      for (const [docId, remoteData] of remoteDocs) {
-        if (!localDocs.has(docId)) {
-          merged.set(docId, remoteData);
-        }
-      }
-
-      // 5. Find deleted file paths
-      const mergedFilePaths = new Set<string>();
-      const mergedStructure = merged.get("structure");
-      if (mergedStructure) {
-        const mergedStructureDoc = Automerge.load<StructureDoc>(mergedStructure);
-        for (const filePath of Object.keys(mergedStructureDoc.files)) {
-          mergedFilePaths.add(filePath);
-        }
-      }
-      const deletedPaths = [...remoteFilePaths].filter(p => !mergedFilePaths.has(p));
-
-      // 6. Push all changes atomically (including deletions)
-      await this.push(merged, deletedPaths);
-
-      return merged;
-    } catch (err) {
-      if (err instanceof SyncError) throw err;
-      const error = err as Error & { status?: number };
-      if (error.status === 401 || error.status === 403) {
-        throw new SyncError(
-          `Authentication failed: ${error.message}`,
-          false,
-          error,
-        );
-      }
-      throw new SyncError(
-        `Sync failed: ${error.message}`,
-        true,
-        error,
-      );
-    }
-  }
-
-  private async fetch(): Promise<Map<string, Uint8Array>> {
+  async fetch(): Promise<Map<string, Uint8Array>> {
     const docs = new Map<string, Uint8Array>();
 
     try {
-      // Get structure doc
-      const structureBlob = await this.getFileContent(
-        ".stash/structure.automerge",
-      );
-      if (structureBlob) {
-        docs.set("structure", structureBlob);
-      }
-
-      // List and fetch doc files
-      const docFiles = await this.listDirectory(".stash/docs");
-      for (const file of docFiles) {
-        if (!file.endsWith(".automerge")) continue;
-        const docId = file.replace(".automerge", "");
-        const blob = await this.getFileContent(`.stash/docs/${file}`);
-        if (blob) docs.set(docId, blob);
-      }
-    } catch (err) {
-      const error = err as Error & { status?: number };
-      if (error.status === 404) {
-        // Repo is empty or .stash doesn't exist yet - that's fine
-        return docs;
-      }
-      throw err;
-    }
-
-    return docs;
-  }
-
-  private async push(docs: Map<string, Uint8Array>, deletedPaths: string[] = []): Promise<void> {
-    // Nothing to push if no docs
-    if (docs.size === 0) return;
-
-    // Build tree entries for .stash/ files
-    const treeEntries: TreeEntry[] = [];
-
-    // Add structure doc
-    const structureData = docs.get("structure");
-    if (structureData) {
-      const blob = await this.createBlob(structureData);
-      treeEntries.push({
-        path: ".stash/structure.automerge",
-        mode: "100644",
-        type: "blob",
-        sha: blob,
-      });
-    }
-
-    // Add file docs
-    for (const [docId, data] of docs) {
-      if (docId === "structure") continue;
-      const blob = await this.createBlob(data);
-      treeEntries.push({
-        path: `.stash/docs/${docId}.automerge`,
-        mode: "100644",
-        type: "blob",
-        sha: blob,
-      });
-    }
-
-    // Render plain text files
-    const plainTextEntries = this.renderPlainText(docs);
-    treeEntries.push(...plainTextEntries);
-
-    // Delete removed files (set sha to null)
-    for (const deletedPath of deletedPaths) {
-      treeEntries.push({
-        path: deletedPath,
-        mode: "100644",
-        type: "blob",
-        sha: null,
-      });
-    }
-
-    // Get current commit SHA
-    let baseTreeSha: string | undefined;
-    let parentSha: string | undefined;
-    try {
+      // Get the current tree recursively (single API call for discovery)
       const { data: ref } = await this.octokit.rest.git.getRef({
         owner: this.owner,
         repo: this.repo,
         ref: `heads/${this.branch}`,
       });
-      parentSha = ref.object.sha;
-
       const { data: commit } = await this.octokit.rest.git.getCommit({
         owner: this.owner,
         repo: this.repo,
-        commit_sha: parentSha,
+        commit_sha: ref.object.sha,
       });
-      baseTreeSha = commit.tree.sha;
+      const { data: tree } = await this.octokit.rest.git.getTree({
+        owner: this.owner,
+        repo: this.repo,
+        tree_sha: commit.tree.sha,
+        recursive: "true",
+      });
+
+      // Fetch all .automerge blobs in parallel
+      const blobFetches: Promise<void>[] = [];
+      for (const item of tree.tree) {
+        if (!item.path?.startsWith(".stash/") || !item.path.endsWith(".automerge")) continue;
+        if (item.type !== "blob" || !item.sha) continue;
+
+        const docId = item.path === ".stash/structure.automerge"
+          ? "structure"
+          : item.path.replace(".stash/docs/", "").replace(".automerge", "");
+
+        blobFetches.push(
+          this.octokit.rest.git.getBlob({
+            owner: this.owner, repo: this.repo, file_sha: item.sha,
+          }).then(({ data }) => {
+            docs.set(docId, Uint8Array.from(Buffer.from(data.content, "base64")));
+          })
+        );
+      }
+      await Promise.all(blobFetches);
     } catch (err) {
       const error = err as Error & { status?: number };
-      if (error.status !== 404) throw err;
-      // No commits yet, will create initial commit
+      if (error.status === 404) return docs;
+      if (error.status === 401 || error.status === 403) {
+        throw new SyncError(`Authentication failed: ${error.message}`, false, error);
+      }
+      throw new SyncError(`Fetch failed: ${error.message}`, true, error);
     }
 
-    // Create tree
-    const { data: tree } = await this.octokit.rest.git.createTree({
-      owner: this.owner,
-      repo: this.repo,
-      tree: treeEntries,
-      base_tree: baseTreeSha,
-    });
+    return docs;
+  }
 
-    // Create commit
-    const { data: commit } = await this.octokit.rest.git.createCommit({
-      owner: this.owner,
-      repo: this.repo,
-      message: "sync: update stash",
-      tree: tree.sha,
-      parents: parentSha ? [parentSha] : [],
-    });
+  async push(docs: Map<string, Uint8Array>): Promise<void> {
+    if (docs.size === 0) return;
 
-    // Update ref
-    if (parentSha) {
-      await this.octokit.rest.git.updateRef({
+    try {
+      // Build tree entries for .stash/ files
+      const treeEntries: TreeEntry[] = [];
+
+      // Add structure doc
+      const structureData = docs.get("structure");
+      if (structureData) {
+        const blob = await this.createBlob(structureData);
+        treeEntries.push({
+          path: ".stash/structure.automerge",
+          mode: "100644",
+          type: "blob",
+          sha: blob,
+        });
+      }
+
+      // Add file docs
+      for (const [docId, data] of docs) {
+        if (docId === "structure") continue;
+        const blob = await this.createBlob(data);
+        treeEntries.push({
+          path: `.stash/docs/${docId}.automerge`,
+          mode: "100644",
+          type: "blob",
+          sha: blob,
+        });
+      }
+
+      // Render plain text files
+      const plainTextEntries = this.renderPlainText(docs);
+      treeEntries.push(...plainTextEntries);
+
+      // Get current commit SHA and tree for deletion tracking
+      let baseTreeSha: string | undefined;
+      let parentSha: string | undefined;
+      let remoteFilePaths = new Set<string>();
+      try {
+        const { data: ref } = await this.octokit.rest.git.getRef({
+          owner: this.owner,
+          repo: this.repo,
+          ref: `heads/${this.branch}`,
+        });
+        parentSha = ref.object.sha;
+
+        const { data: commitData } = await this.octokit.rest.git.getCommit({
+          owner: this.owner,
+          repo: this.repo,
+          commit_sha: parentSha,
+        });
+        baseTreeSha = commitData.tree.sha;
+
+        // Get full tree to find existing plain-text files for deletion tracking
+        const { data: fullTree } = await this.octokit.rest.git.getTree({
+          owner: this.owner,
+          repo: this.repo,
+          tree_sha: commitData.tree.sha,
+          recursive: "true",
+        });
+        for (const item of fullTree.tree) {
+          if (item.type === "blob" && item.path && !item.path.startsWith(".stash/")) {
+            remoteFilePaths.add(item.path);
+          }
+        }
+      } catch (err) {
+        const error = err as Error & { status?: number };
+        if (error.status !== 404) throw err;
+        // No commits yet, will create initial commit
+      }
+
+      // Compute deleted plain-text files
+      const mergedFilePaths = new Set<string>();
+      if (structureData) {
+        const structureDoc = Automerge.load<StructureDoc>(structureData);
+        for (const filePath of Object.keys(structureDoc.files)) {
+          mergedFilePaths.add(filePath);
+        }
+      }
+      for (const remotePath of remoteFilePaths) {
+        if (!mergedFilePaths.has(remotePath)) {
+          treeEntries.push({
+            path: remotePath,
+            mode: "100644",
+            type: "blob",
+            sha: null,
+          });
+        }
+      }
+
+      // Create tree
+      const { data: tree } = await this.octokit.rest.git.createTree({
         owner: this.owner,
         repo: this.repo,
-        ref: `heads/${this.branch}`,
-        sha: commit.sha,
+        tree: treeEntries,
+        base_tree: baseTreeSha,
       });
-    } else {
-      await this.octokit.rest.git.createRef({
+
+      // Create commit
+      const { data: commit } = await this.octokit.rest.git.createCommit({
         owner: this.owner,
         repo: this.repo,
-        ref: `refs/heads/${this.branch}`,
-        sha: commit.sha,
+        message: "sync: update stash",
+        tree: tree.sha,
+        parents: parentSha ? [parentSha] : [],
       });
+
+      // Update ref
+      if (parentSha) {
+        await this.octokit.rest.git.updateRef({
+          owner: this.owner,
+          repo: this.repo,
+          ref: `heads/${this.branch}`,
+          sha: commit.sha,
+        });
+      } else {
+        await this.octokit.rest.git.createRef({
+          owner: this.owner,
+          repo: this.repo,
+          ref: `refs/heads/${this.branch}`,
+          sha: commit.sha,
+        });
+      }
+    } catch (err) {
+      if (err instanceof SyncError) throw err;
+      const error = err as Error & { status?: number };
+      if (error.status === 401 || error.status === 403) {
+        throw new SyncError(`Authentication failed: ${error.message}`, false, error);
+      }
+      throw new SyncError(`Push failed: ${error.message}`, true, error);
     }
   }
 
@@ -305,48 +288,6 @@ export class GitHubProvider implements SyncProvider {
     }
 
     return entries;
-  }
-
-  private async getFileContent(
-    filePath: string,
-  ): Promise<Uint8Array | null> {
-    try {
-      const { data } = await this.octokit.rest.repos.getContent({
-        owner: this.owner,
-        repo: this.repo,
-        path: filePath,
-        ref: this.branch,
-      });
-
-      if ("content" in data && data.content) {
-        return Uint8Array.from(Buffer.from(data.content, "base64"));
-      }
-      return null;
-    } catch (err) {
-      const error = err as Error & { status?: number };
-      if (error.status === 404) return null;
-      throw err;
-    }
-  }
-
-  private async listDirectory(dirPath: string): Promise<string[]> {
-    try {
-      const { data } = await this.octokit.rest.repos.getContent({
-        owner: this.owner,
-        repo: this.repo,
-        path: dirPath,
-        ref: this.branch,
-      });
-
-      if (Array.isArray(data)) {
-        return data.map((item) => item.name);
-      }
-      return [];
-    } catch (err) {
-      const error = err as Error & { status?: number };
-      if (error.status === 404) return [];
-      throw err;
-    }
   }
 
   private async createBlob(data: Uint8Array): Promise<string> {

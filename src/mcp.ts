@@ -114,8 +114,8 @@ export function createMcpServer(manager: StashManager): Server {
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args } = request.params;
 
-    // Reload to pick up external changes before each operation
-    await manager.reload();
+    // Reload to pick up external changes (throttled to avoid redundant disk reads)
+    await manager.reloadIfStale();
 
     switch (name) {
       case "stash_list":

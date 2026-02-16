@@ -30,8 +30,8 @@ export async function writeConfig(
   baseDir: string = DEFAULT_STASH_DIR,
 ): Promise<void> {
   const filePath = configPath(baseDir);
-  await fs.mkdir(path.dirname(filePath), { recursive: true });
-  await fs.writeFile(filePath, JSON.stringify(config, null, 2) + "\n");
+  await fs.mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 });
+  await fs.writeFile(filePath, JSON.stringify(config, null, 2) + "\n", { mode: 0o600 });
 }
 
 export async function getGitHubToken(

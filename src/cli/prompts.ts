@@ -1,4 +1,5 @@
 import { createInterface } from "node:readline/promises";
+import { Writable } from "node:stream";
 
 export async function prompt(question: string): Promise<string> {
   const rl = createInterface({
@@ -13,8 +14,18 @@ export async function prompt(question: string): Promise<string> {
 }
 
 export async function promptSecret(question: string): Promise<string> {
-  // Simple secret prompt - in production you'd want to hide input
-  return prompt(question);
+  process.stdout.write(question);
+  const rl = createInterface({
+    input: process.stdin,
+    output: new Writable({ write: (_chunk, _enc, cb) => cb() }),
+    terminal: true,
+  });
+  try {
+    return await rl.question("");
+  } finally {
+    rl.close();
+    process.stdout.write("\n");
+  }
 }
 
 export async function promptChoice(

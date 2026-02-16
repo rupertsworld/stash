@@ -8,6 +8,8 @@ import { GitHubProvider } from "../providers/github.js";
 export class StashManager {
   private stashes: Map<string, Stash>;
   private baseDir: string;
+  private lastReloadMs = 0;
+  private static RELOAD_INTERVAL_MS = 2000;
 
   constructor(stashes: Map<string, Stash>, baseDir: string) {
     this.stashes = stashes;
@@ -53,7 +55,9 @@ export class StashManager {
       // Base dir doesn't exist yet
     }
 
-    return new StashManager(stashes, baseDir);
+    const manager = new StashManager(stashes, baseDir);
+    manager.lastReloadMs = Date.now();
+    return manager;
   }
 
   get(name: string): Stash | undefined {
@@ -66,6 +70,17 @@ export class StashManager {
   async reload(): Promise<void> {
     const fresh = await StashManager.load(this.baseDir);
     this.stashes = fresh.stashes;
+    this.lastReloadMs = Date.now();
+  }
+
+  /**
+   * Reload only if enough time has passed since last reload.
+   * Caps reloads to at most once per RELOAD_INTERVAL_MS.
+   */
+  async reloadIfStale(): Promise<void> {
+    const now = Date.now();
+    if (now - this.lastReloadMs < StashManager.RELOAD_INTERVAL_MS) return;
+    await this.reload();
   }
 
   list(): string[] {
@@ -78,6 +93,7 @@ export class StashManager {
     providerType: string | null = null,
     key: string | null = null,
   ): Promise<Stash> {
+    validateStashName(name);
     if (this.stashes.has(name)) {
       throw new Error(`Stash already exists: ${name}`);
     }
@@ -92,6 +108,7 @@ export class StashManager {
     localName: string,
     provider: SyncProvider,
   ): Promise<Stash> {
+    validateStashName(localName);
     if (this.stashes.has(localName)) {
       throw new Error(`Stash already exists: ${localName}`);
     }
@@ -148,5 +165,19 @@ export class StashManager {
     if (errors.length > 0) {
       throw new AggregateError(errors, "Some stashes failed to sync");
     }
+  }
+}
+
+const VALID_NAME = /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/;
+
+function validateStashName(name: string): void {
+  if (!name || name.length > 64) {
+    throw new Error("Stash name must be 1-64 characters");
+  }
+  if (!VALID_NAME.test(name)) {
+    throw new Error(
+      "Stash name must start with a letter or number and contain only "
+      + "letters, numbers, dots, hyphens, or underscores"
+    );
   }
 }

@@ -17,18 +17,30 @@ const WATCH_DEBOUNCE_MS = 500;
 
 export async function startDaemon(baseDir: string = DEFAULT_STASH_DIR): Promise<void> {
   const manager = await StashManager.load(baseDir);
-  const mcpServer = createMcpServer(manager);
+
+  // Write PID file for clean shutdown
+  const pidFile = path.join(baseDir, "daemon.pid");
+  fs.mkdirSync(baseDir, { recursive: true });
+  fs.writeFileSync(pidFile, String(process.pid));
+
+  const cleanup = () => {
+    try { fs.unlinkSync(pidFile); } catch {}
+    process.exit(0);
+  };
+  process.on("SIGTERM", cleanup);
+  process.on("SIGINT", cleanup);
 
   const app = express();
   app.use(express.json());
 
-  // MCP endpoint
+  // MCP endpoint -- fresh server per request to avoid transport conflicts
   app.post("/mcp", async (req, res) => {
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined, // Stateless
     });
+    const requestServer = createMcpServer(manager);
     res.on("close", () => transport.close());
-    await mcpServer.connect(transport);
+    await requestServer.connect(transport);
     await transport.handleRequest(req, res, req.body);
   });
 

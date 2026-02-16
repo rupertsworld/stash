@@ -1,4 +1,5 @@
 import * as Automerge from "@automerge/automerge";
+import { splice } from "@automerge/automerge/next";
 
 export interface FileDoc {
   content: Automerge.Text;
@@ -24,9 +25,7 @@ export function setContent(
   content: string,
 ): Automerge.Doc<FileDoc> {
   return Automerge.change(doc, (d) => {
-    const len = d.content.length;
-    if (len > 0) d.content.deleteAt(0, len);
-    if (content.length > 0) d.content.insertAt(0, ...content.split(""));
+    splice(d, ["content"], 0, d.content.length, content);
   });
 }
 
@@ -37,8 +36,6 @@ export function applyPatch(
   text: string,
 ): Automerge.Doc<FileDoc> {
   return Automerge.change(doc, (d) => {
-    const deleteCount = end - start;
-    if (deleteCount > 0) d.content.deleteAt(start, deleteCount);
-    if (text.length > 0) d.content.insertAt(start, ...text.split(""));
+    splice(d, ["content"], start, end - start, text);
   });
 }

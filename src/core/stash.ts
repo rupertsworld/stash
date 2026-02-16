@@ -37,6 +37,7 @@ export class Stash {
   private baseDir: string;
   private meta: StashMeta;
   private dirty = false;
+  private saveGeneration = 0;
   private savePromise: Promise<void> | null = null;
   private syncTimeout: ReturnType<typeof setTimeout> | null = null;
   private syncing = false;
@@ -259,27 +260,48 @@ export class Stash {
       localDocs.set(docId, Automerge.save(fileDoc));
     }
 
-    // 3. Provider syncs with retry
-    const mergedDocs = await withRetry(() => this.provider!.sync(localDocs));
+    // 3. Fetch remote documents
+    const remoteDocs = await withRetry(() => this.provider!.fetch());
 
-    // 4. Load merged structure
+    // 4. Merge locally
+    const merged = new Map<string, Uint8Array>();
+    for (const [docId, localData] of localDocs) {
+      const remoteData = remoteDocs.get(docId);
+      if (remoteData) {
+        const localDoc = Automerge.load<unknown>(localData);
+        const remoteDoc = Automerge.load<unknown>(remoteData);
+        merged.set(docId, Automerge.save(Automerge.merge(localDoc, remoteDoc as typeof localDoc)));
+      } else {
+        merged.set(docId, localData);
+      }
+    }
+    for (const [docId, remoteData] of remoteDocs) {
+      if (!localDocs.has(docId)) {
+        merged.set(docId, remoteData);
+      }
+    }
+
+    // 5. Push merged state
+    await withRetry(() => this.provider!.push(merged));
+
+    // 6. Load merged structure
     this.structureDoc = Automerge.load<StructureDoc>(
-      mergedDocs.get("structure")!,
+      merged.get("structure")!,
     );
 
-    // 5. Load only referenced file docs
+    // 7. Load only referenced file docs
     const referencedDocIds = new Set(
       Object.values(this.structureDoc.files).map((f) => f.docId),
     );
 
     this.fileDocs.clear();
-    for (const [docId, data] of mergedDocs) {
+    for (const [docId, data] of merged) {
       if (docId !== "structure" && referencedDocIds.has(docId)) {
         this.fileDocs.set(docId, Automerge.load<FileDoc>(data));
       }
     }
 
-    // 6. Persist
+    // 8. Persist
     await this.save();
   }
 
@@ -337,13 +359,20 @@ export class Stash {
 
   private scheduleBackgroundSave(): void {
     this.dirty = true;
+    this.saveGeneration++;
 
-    // Chain saves to ensure they complete in order
+    const generationAtSchedule = this.saveGeneration;
     const previousSave = this.savePromise ?? Promise.resolve();
     this.savePromise = previousSave.then(() =>
-      this.save().catch((err) => {
-        console.error(`Save failed for ${this.name}:`, (err as Error).message);
-      })
+      this.save()
+        .then(() => {
+          if (this.saveGeneration === generationAtSchedule) {
+            this.dirty = false;
+          }
+        })
+        .catch((err) => {
+          console.error(`Save failed for ${this.name}:`, (err as Error).message);
+        })
     );
 
     // Debounce sync
@@ -352,13 +381,9 @@ export class Stash {
     }
     this.syncTimeout = setTimeout(() => {
       this.syncTimeout = null;
-      this.sync()
-        .then(() => {
-          this.dirty = false;
-        })
-        .catch((err) => {
-          console.error(`Sync failed for ${this.name}:`, (err as Error).message);
-        });
+      this.sync().catch((err) => {
+        console.error(`Sync failed for ${this.name}:`, (err as Error).message);
+      });
     }, Stash.SYNC_DEBOUNCE_MS);
   }
 }
