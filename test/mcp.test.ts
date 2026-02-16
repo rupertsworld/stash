@@ -340,6 +340,79 @@ describe("MCP Server", () => {
     expect(data.deleted).toEqual([]);
   });
 
+  it("stash_delete: should remove empty parent directory", async () => {
+    const stash = await manager.create("test");
+    await fs.mkdir(path.join(stash.path, "docs"), { recursive: true });
+    await fs.writeFile(path.join(stash.path, "docs/only.md"), "content");
+    stash.write("docs/only.md", "content");
+    await stash.flush();
+
+    await client.callTool({
+      name: "stash_delete",
+      arguments: { stash: "test", path: "docs/only.md" },
+    });
+
+    // Empty directory should be removed
+    await expect(fs.access(path.join(stash.path, "docs"))).rejects.toThrow();
+  });
+
+  it("stash_delete: should remove nested empty directories", async () => {
+    const stash = await manager.create("test");
+    await fs.mkdir(path.join(stash.path, "a/b/c"), { recursive: true });
+    await fs.writeFile(path.join(stash.path, "a/b/c/deep.md"), "content");
+    stash.write("a/b/c/deep.md", "content");
+    await stash.flush();
+
+    await client.callTool({
+      name: "stash_delete",
+      arguments: { stash: "test", path: "a/b/c/deep.md" },
+    });
+
+    // All empty parent dirs should be removed
+    await expect(fs.access(path.join(stash.path, "a/b/c"))).rejects.toThrow();
+    await expect(fs.access(path.join(stash.path, "a/b"))).rejects.toThrow();
+    await expect(fs.access(path.join(stash.path, "a"))).rejects.toThrow();
+  });
+
+  it("stash_delete: should not remove directory with remaining files", async () => {
+    const stash = await manager.create("test");
+    await fs.mkdir(path.join(stash.path, "docs"), { recursive: true });
+    await fs.writeFile(path.join(stash.path, "docs/delete.md"), "delete");
+    await fs.writeFile(path.join(stash.path, "docs/keep.md"), "keep");
+    stash.write("docs/delete.md", "delete");
+    stash.write("docs/keep.md", "keep");
+    await stash.flush();
+
+    await client.callTool({
+      name: "stash_delete",
+      arguments: { stash: "test", path: "docs/delete.md" },
+    });
+
+    // Directory should still exist
+    await expect(fs.access(path.join(stash.path, "docs"))).resolves.toBeUndefined();
+    // Other file should still exist
+    const content = await fs.readFile(path.join(stash.path, "docs/keep.md"), "utf-8");
+    expect(content).toBe("keep");
+  });
+
+  it("stash_delete: glob should remove empty directories after bulk delete", async () => {
+    const stash = await manager.create("test");
+    await fs.mkdir(path.join(stash.path, "docs"), { recursive: true });
+    await fs.writeFile(path.join(stash.path, "docs/a.md"), "a");
+    await fs.writeFile(path.join(stash.path, "docs/b.md"), "b");
+    stash.write("docs/a.md", "a");
+    stash.write("docs/b.md", "b");
+    await stash.flush();
+
+    await client.callTool({
+      name: "stash_delete",
+      arguments: { stash: "test", glob: "docs/**" },
+    });
+
+    // Directory should be removed after all files deleted
+    await expect(fs.access(path.join(stash.path, "docs"))).rejects.toThrow();
+  });
+
   it("stash_move: should move file on disk", async () => {
     const stash = await manager.create("test");
     await fs.writeFile(path.join(stash.path, "old.md"), "content");

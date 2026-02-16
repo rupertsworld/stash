@@ -8,6 +8,21 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import type { StashManager } from "./core/manager.js";
 
+/**
+ * Remove empty parent directories up to (but not including) stopAt.
+ */
+async function removeEmptyParents(filePath: string, stopAt: string): Promise<void> {
+  let dir = nodePath.dirname(filePath);
+  while (dir !== stopAt && dir !== nodePath.dirname(dir)) {
+    try {
+      await fs.rmdir(dir); // fails if not empty
+      dir = nodePath.dirname(dir);
+    } catch {
+      break; // not empty or other error
+    }
+  }
+}
+
 export function createMcpServer(manager: StashManager): Server {
   const server = new Server(
     { name: "stash", version: "1.0.0" },
@@ -361,6 +376,7 @@ async function handleDelete(
     const diskPath = nodePath.join(stash.path, filePath);
     try {
       await fs.unlink(diskPath);
+      await removeEmptyParents(diskPath, stash.path);
       return jsonResponse({ success: true });
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === "ENOENT") {
@@ -387,6 +403,12 @@ async function handleDelete(
     } catch (err) {
       errors.push(`${file}: ${(err as Error).message}`);
     }
+  }
+
+  // Clean up empty directories after all files deleted
+  for (const file of deleted) {
+    const diskPath = nodePath.join(stash.path, file);
+    await removeEmptyParents(diskPath, stash.path);
   }
 
   if (errors.length > 0) {

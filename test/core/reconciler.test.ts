@@ -206,6 +206,73 @@ describe("StashReconciler", { timeout: 15000 }, () => {
 
       expect(stash.list()).toEqual([]);
     });
+
+    it("should remove empty parent directory after file deletion", async () => {
+      stash.write("docs/guide.md", "content");
+      await stash.flush();
+      await reconciler.flush();
+      await reconciler.start();
+
+      // Verify directory exists
+      const docsDir = path.join(tmpDir, "docs");
+      await expect(fs.access(docsDir)).resolves.toBeUndefined();
+
+      // Delete the only file
+      await fs.unlink(path.join(tmpDir, "docs/guide.md"));
+      await settle(1200);
+
+      // Directory should be removed
+      await expect(fs.access(docsDir)).rejects.toThrow();
+    });
+
+    it("should remove nested empty directories after file deletion", async () => {
+      stash.write("a/b/c/deep.md", "content");
+      await stash.flush();
+      await reconciler.flush();
+      await reconciler.start();
+
+      // Delete the file
+      await fs.unlink(path.join(tmpDir, "a/b/c/deep.md"));
+      await settle(1200);
+
+      // All empty parent dirs should be removed
+      await expect(fs.access(path.join(tmpDir, "a/b/c"))).rejects.toThrow();
+      await expect(fs.access(path.join(tmpDir, "a/b"))).rejects.toThrow();
+      await expect(fs.access(path.join(tmpDir, "a"))).rejects.toThrow();
+    });
+
+    it("should not remove directory if other files remain", async () => {
+      stash.write("docs/guide.md", "guide");
+      stash.write("docs/api.md", "api");
+      await stash.flush();
+      await reconciler.flush();
+      await reconciler.start();
+
+      // Delete one file
+      await fs.unlink(path.join(tmpDir, "docs/guide.md"));
+      await settle(1200);
+
+      // Directory should still exist (api.md is still there)
+      const docsDir = path.join(tmpDir, "docs");
+      await expect(fs.access(docsDir)).resolves.toBeUndefined();
+
+      // Other file should still exist
+      const content = await fs.readFile(path.join(tmpDir, "docs/api.md"), "utf-8");
+      expect(content).toBe("api");
+    });
+
+    it("should stop cleanup at stash root", async () => {
+      stash.write("only-file.md", "content");
+      await stash.flush();
+      await reconciler.flush();
+      await reconciler.start();
+
+      await fs.unlink(path.join(tmpDir, "only-file.md"));
+      await settle(1200);
+
+      // Stash root should still exist
+      await expect(fs.access(tmpDir)).resolves.toBeUndefined();
+    });
   });
 
   describe("rename detection", () => {

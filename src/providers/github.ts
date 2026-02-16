@@ -106,12 +106,12 @@ export class GitHubProvider implements SyncProvider {
     }
 
     // With path prefix - delete only files under the prefix
-    const filesToDelete = await this.listAllFilesUnderPrefix();
-    if (filesToDelete.length === 0) return;
+    const relativeFiles = await this.listFiles(true);
+    if (relativeFiles.length === 0) return;
 
     // Create tree entries with sha: null to delete files
-    const treeEntries: TreeEntry[] = filesToDelete.map((path) => ({
-      path,
+    const treeEntries: TreeEntry[] = relativeFiles.map((relativePath) => ({
+      path: this.prefixPath(relativePath),
       mode: "100644" as const,
       type: "blob" as const,
       sha: null,
@@ -156,38 +156,6 @@ export class GitHubProvider implements SyncProvider {
       ref: `heads/${this.branch}`,
       sha: newCommit.sha,
     });
-  }
-
-  private async listAllFilesUnderPrefix(): Promise<string[]> {
-    const files: string[] = [];
-
-    const walk = async (dirPath: string): Promise<void> => {
-      try {
-        const { data } = await this.octokit.rest.repos.getContent({
-          owner: this.owner,
-          repo: this.repo,
-          path: dirPath,
-          ref: this.branch,
-        });
-
-        if (!Array.isArray(data)) return;
-
-        for (const item of data) {
-          if (item.type === "file") {
-            files.push(item.path);
-          } else if (item.type === "dir") {
-            await walk(item.path);
-          }
-        }
-      } catch (err) {
-        const error = err as Error & { status?: number };
-        if (error.status === 404) return;
-        throw err;
-      }
-    };
-
-    await walk(this.pathPrefix);
-    return files;
   }
 
   async fetch(): Promise<Map<string, Uint8Array>> {
@@ -294,17 +262,10 @@ export class GitHubProvider implements SyncProvider {
       });
       baseTreeSha = commit.tree.sha;
 
-      // List existing files to compute deletions
-      const remoteFiles = await this.listAllFilesUnderPrefix();
+      // List existing files to compute deletions (uses efficient tree API)
+      const remoteFiles = await this.listFiles();
       for (const file of remoteFiles) {
-        // Strip prefix to get relative path
-        const relativePath = this.pathPrefix
-          ? file.slice(this.pathPrefix.length + 1)
-          : file;
-        // Only track user files, not .stash/
-        if (!relativePath.startsWith(".stash/")) {
-          existingFiles.add(relativePath);
-        }
+        existingFiles.add(file);
       }
     } catch (err) {
       const error = err as Error & { status?: number };
@@ -412,11 +373,12 @@ export class GitHubProvider implements SyncProvider {
   }
 
   /**
-   * List all user files in the repo (excluding .stash/ and .git/).
+   * List all user files in the repo (excluding .git/).
    * Uses the Git tree API for efficiency.
    * Returns paths relative to the pathPrefix (if set).
+   * @param includeInternal - if true, includes .stash/ files (for delete operations)
    */
-  async listFiles(): Promise<string[]> {
+  async listFiles(includeInternal = false): Promise<string[]> {
     try {
       // Get current commit
       const { data: ref } = await this.octokit.rest.git.getRef({
@@ -452,9 +414,9 @@ export class GitHubProvider implements SyncProvider {
           relativePath = item.path.slice(this.pathPrefix.length + 1);
         }
 
-        // Exclude .stash/ and .git/ directories
-        if (relativePath.startsWith(".stash/")) continue;
+        // Exclude .git/ always, .stash/ unless includeInternal
         if (relativePath.startsWith(".git/")) continue;
+        if (!includeInternal && relativePath.startsWith(".stash/")) continue;
 
         files.push(relativePath);
       }

@@ -8,6 +8,21 @@ import diff from "fast-diff";
 import type { Stash } from "./stash.js";
 import type { FileDoc, TextFileDoc } from "./file.js";
 
+/**
+ * Remove empty parent directories up to (but not including) stopAt.
+ */
+async function removeEmptyParents(filePath: string, stopAt: string): Promise<void> {
+  let dir = nodePath.dirname(filePath);
+  while (dir !== stopAt && dir !== nodePath.dirname(dir)) {
+    try {
+      await fs.rmdir(dir); // fails if not empty
+      dir = nodePath.dirname(dir);
+    } catch {
+      break; // not empty or other error
+    }
+  }
+}
+
 interface Patch {
   type: "insert" | "delete";
   index: number;
@@ -515,6 +530,10 @@ export class StashReconciler {
     // Clean up snapshot
     this.diskSnapshots.delete(relativePath);
 
+    // Clean up empty parent directories
+    const diskPath = nodePath.join(this.stash.path, relativePath);
+    await removeEmptyParents(diskPath, this.stash.path);
+
     await this.stash.save();
     this.stash.scheduleSync();
   }
@@ -651,6 +670,7 @@ export class StashReconciler {
       if (isKnown) {
         // We knew about this file - remote/local deletion wins
         await fs.unlink(diskPath);
+        await removeEmptyParents(diskPath, this.stash.path);
         this.stash.removeKnownPath(relativePath);
         this.diskSnapshots.delete(relativePath);
       } else {

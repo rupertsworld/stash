@@ -145,6 +145,9 @@ describe("GitHubProvider", () => {
     mockOctokit.rest.git.getCommit.mockResolvedValue({
       data: { tree: { sha: "base-tree-sha" } },
     });
+    mockOctokit.rest.git.getTree.mockResolvedValue({
+      data: { tree: [] },
+    });
     mockOctokit.rest.git.createBlob.mockResolvedValue({
       data: { sha: "blob-sha" },
     });
@@ -155,10 +158,6 @@ describe("GitHubProvider", () => {
       data: { sha: "commit-sha" },
     });
     mockOctokit.rest.git.updateRef.mockResolvedValue({ data: {} });
-    // Mock listing existing files (empty for this test)
-    mockOctokit.rest.repos.getContent.mockRejectedValue(
-      Object.assign(new Error("Not Found"), { status: 404 }),
-    );
 
     await provider.push(localDocs, new Map([["hello.md", "Hello!"]]));
 
@@ -203,6 +202,9 @@ describe("GitHubProvider", () => {
       mockOctokit.rest.git.getCommit.mockResolvedValue({
         data: { tree: { sha: "base-tree-sha" } },
       });
+      mockOctokit.rest.git.getTree.mockResolvedValue({
+        data: { tree: [] },
+      });
       mockOctokit.rest.git.createBlob.mockResolvedValue({
         data: { sha: "blob-sha" },
       });
@@ -213,10 +215,6 @@ describe("GitHubProvider", () => {
         data: { sha: "commit-sha" },
       });
       mockOctokit.rest.git.updateRef.mockResolvedValue({ data: {} });
-      // Mock listing existing files (empty)
-      mockOctokit.rest.repos.getContent.mockRejectedValue(
-        Object.assign(new Error("Not Found"), { status: 404 }),
-      );
 
       await prefixedProvider.push(localDocs, new Map([["hello.md", "Hello!"]]));
 
@@ -249,6 +247,9 @@ describe("GitHubProvider", () => {
       nestedMock.rest.git.getCommit.mockResolvedValue({
         data: { tree: { sha: "base-tree-sha" } },
       });
+      nestedMock.rest.git.getTree.mockResolvedValue({
+        data: { tree: [] },
+      });
       nestedMock.rest.git.createBlob.mockResolvedValue({
         data: { sha: "blob-sha" },
       });
@@ -259,10 +260,6 @@ describe("GitHubProvider", () => {
         data: { sha: "commit-sha" },
       });
       nestedMock.rest.git.updateRef.mockResolvedValue({ data: {} });
-      // Mock listing existing files (empty)
-      nestedMock.rest.repos.getContent.mockRejectedValue(
-        Object.assign(new Error("Not Found"), { status: 404 }),
-      );
 
       await nestedProvider.push(localDocs, new Map([["hello.md", "Hello!"]]));
 
@@ -293,36 +290,17 @@ describe("GitHubProvider", () => {
         (Octokit as any).mock.results.length - 1
       ].value;
 
-      // Mock listing files under prefix
-      prefixMock.rest.repos.getContent.mockImplementation(
-        async ({ path }: { path: string }) => {
-          if (path === "notes") {
-            return {
-              data: [
-                { name: "readme.md", type: "file", path: "notes/readme.md" },
-                { name: ".stash", type: "dir", path: "notes/.stash" },
-              ],
-            };
-          }
-          if (path === "notes/.stash") {
-            return {
-              data: [
-                { name: "meta.json", type: "file", path: "notes/.stash/meta.json" },
-                { name: "structure.automerge", type: "file", path: "notes/.stash/structure.automerge" },
-                { name: "docs", type: "dir", path: "notes/.stash/docs" },
-              ],
-            };
-          }
-          if (path === "notes/.stash/docs") {
-            return {
-              data: [
-                { name: "abc123.automerge", type: "file", path: "notes/.stash/docs/abc123.automerge" },
-              ],
-            };
-          }
-          throw Object.assign(new Error("Not Found"), { status: 404 });
+      // Mock listing files via tree API (includes .stash/ when includeInternal=true)
+      prefixMock.rest.git.getTree.mockResolvedValue({
+        data: {
+          tree: [
+            { path: "notes/readme.md", type: "blob" },
+            { path: "notes/.stash/meta.json", type: "blob" },
+            { path: "notes/.stash/structure.automerge", type: "blob" },
+            { path: "notes/.stash/docs/abc123.automerge", type: "blob" },
+          ],
         },
-      );
+      });
 
       prefixMock.rest.git.getRef.mockResolvedValue({
         data: { object: { sha: "parent-sha" } },
@@ -350,6 +328,7 @@ describe("GitHubProvider", () => {
         .filter((e: any) => e.sha === null)
         .map((e: any) => e.path);
 
+      // All files should be deleted with their full prefixed paths
       expect(deletedPaths).toContain("notes/readme.md");
       expect(deletedPaths).toContain("notes/.stash/meta.json");
       expect(deletedPaths).toContain("notes/.stash/structure.automerge");
