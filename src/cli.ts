@@ -101,7 +101,7 @@ program
 program
   .command("stop")
   .description("Stop the background daemon")
-  .action(stopDaemon);
+  .action(() => stopDaemon());
 
 program
   .command("install")
