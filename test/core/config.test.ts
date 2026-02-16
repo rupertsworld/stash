@@ -129,4 +129,23 @@ describe("Config", () => {
       expect(config.stashes.work).toBe("/home/user/Repos/work-docs");
     });
   });
+
+  describe("file permissions", () => {
+    it("should set restrictive permissions on config file", async () => {
+      await ensureConfig(tmpDir);
+      const stat = await fs.stat(path.join(tmpDir, "config.json"));
+      // 0o600 = rw------- (owner read/write only)
+      const mode = stat.mode & 0o777;
+      expect(mode).toBe(0o600);
+    });
+
+    it("should set restrictive permissions on base directory", async () => {
+      const newDir = path.join(tmpDir, "secure");
+      await ensureConfig(newDir);
+      const stat = await fs.stat(newDir);
+      // 0o700 = rwx------ (owner read/write/execute only)
+      const mode = stat.mode & 0o777;
+      expect(mode).toBe(0o700);
+    });
+  });
 });

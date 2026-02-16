@@ -13,10 +13,31 @@ import {
 import type { SyncProvider } from "../providers/types.js";
 import { GitHubProvider, parseGitHubRemote } from "../providers/github.js";
 
+// Valid stash name: starts with letter/number, contains only alphanumeric, dots, hyphens, underscores
+const VALID_NAME = /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/;
+
+function validateStashName(name: string): void {
+  if (!name || name.length === 0) {
+    throw new Error("Stash name is required");
+  }
+  if (name.length > 64) {
+    throw new Error("Stash name must be 64 characters or less");
+  }
+  if (!VALID_NAME.test(name)) {
+    throw new Error(
+      "Stash name must start with a letter or number and contain only " +
+      "letters, numbers, dots, hyphens, or underscores"
+    );
+  }
+}
+
 export class StashManager {
+  private static readonly RELOAD_INTERVAL_MS = 2000;
+
   private stashes: Map<string, Stash>;
   private config: GlobalConfig;
   private baseDir: string;
+  private lastReloadMs = 0;
 
   constructor(
     stashes: Map<string, Stash>,
@@ -76,6 +97,15 @@ export class StashManager {
     const fresh = await StashManager.load(this.baseDir);
     this.stashes = fresh.stashes;
     this.config = fresh.config;
+    this.lastReloadMs = Date.now();
+  }
+
+  async reloadIfStale(): Promise<void> {
+    const now = Date.now();
+    if (now - this.lastReloadMs < StashManager.RELOAD_INTERVAL_MS) {
+      return;
+    }
+    await this.reload();
   }
 
   list(): string[] {
@@ -97,6 +127,7 @@ export class StashManager {
     remote: string | null = null,
     description?: string,
   ): Promise<Stash> {
+    validateStashName(name);
     if (this.stashes.has(name)) {
       throw new Error(`Stash already exists: ${name}`);
     }
@@ -134,6 +165,7 @@ export class StashManager {
     stashPath?: string,
     description?: string,
   ): Promise<Stash> {
+    validateStashName(localName);
     if (this.stashes.has(localName)) {
       throw new Error(`Stash already exists: ${localName}`);
     }

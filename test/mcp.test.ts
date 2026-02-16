@@ -60,9 +60,10 @@ describe("MCP Server", () => {
 
   it("stash_list: should list files in stash root", async () => {
     const stash = await manager.create("test");
-    stash.write("readme.md", "r");
-    stash.write("docs/guide.md", "g");
-    await stash.flush();
+    // Write to filesystem (MCP reads from filesystem)
+    await fs.writeFile(path.join(stash.path, "readme.md"), "r");
+    await fs.mkdir(path.join(stash.path, "docs"), { recursive: true });
+    await fs.writeFile(path.join(stash.path, "docs/guide.md"), "g");
 
     const result = await client.callTool({
       name: "stash_list",
@@ -75,9 +76,10 @@ describe("MCP Server", () => {
 
   it("stash_list: should list files in subdirectory", async () => {
     const stash = await manager.create("test");
-    stash.write("docs/a.md", "a");
-    stash.write("docs/b.md", "b");
-    await stash.flush();
+    // Write to filesystem
+    await fs.mkdir(path.join(stash.path, "docs"), { recursive: true });
+    await fs.writeFile(path.join(stash.path, "docs/a.md"), "a");
+    await fs.writeFile(path.join(stash.path, "docs/b.md"), "b");
 
     const result = await client.callTool({
       name: "stash_list",
@@ -90,10 +92,12 @@ describe("MCP Server", () => {
 
   it("stash_glob: should find matching files", async () => {
     const stash = await manager.create("test");
-    stash.write("readme.md", "r");
-    stash.write("docs/guide.md", "g");
-    stash.write("src/index.ts", "i");
-    await stash.flush();
+    // Write to filesystem
+    await fs.writeFile(path.join(stash.path, "readme.md"), "r");
+    await fs.mkdir(path.join(stash.path, "docs"), { recursive: true });
+    await fs.writeFile(path.join(stash.path, "docs/guide.md"), "g");
+    await fs.mkdir(path.join(stash.path, "src"), { recursive: true });
+    await fs.writeFile(path.join(stash.path, "src/index.ts"), "i");
 
     const result = await client.callTool({
       name: "stash_glob",
@@ -352,5 +356,54 @@ describe("MCP Server", () => {
     const data = JSON.parse((result.content as any)[0].text);
     expect(data.matches).toHaveLength(1);
     expect(data.matches[0].path).toBe("a.md");
+  });
+
+  // Fix #14: MCP list/glob should read from filesystem for consistency
+  describe("filesystem consistency", () => {
+    it("stash_list: should see files written directly to disk", async () => {
+      const stash = await manager.create("test");
+
+      // Write file directly to disk (not via stash API)
+      await fs.writeFile(path.join(stash.path, "disk-file.md"), "from disk");
+
+      const result = await client.callTool({
+        name: "stash_list",
+        arguments: { stash: "test" },
+      });
+      const data = JSON.parse((result.content as any)[0].text);
+      expect(data.items).toContain("disk-file.md");
+    });
+
+    it("stash_glob: should see files written directly to disk", async () => {
+      const stash = await manager.create("test");
+
+      // Write files directly to disk
+      await fs.mkdir(path.join(stash.path, "docs"), { recursive: true });
+      await fs.writeFile(path.join(stash.path, "root.md"), "root");
+      await fs.writeFile(path.join(stash.path, "docs/guide.md"), "guide");
+
+      const result = await client.callTool({
+        name: "stash_glob",
+        arguments: { stash: "test", glob: "**/*.md" },
+      });
+      const data = JSON.parse((result.content as any)[0].text);
+      expect(data.files).toContain("root.md");
+      expect(data.files).toContain("docs/guide.md");
+    });
+
+    it("stash_list: should not show deleted files", async () => {
+      const stash = await manager.create("test");
+
+      // Create then delete a file
+      await fs.writeFile(path.join(stash.path, "temp.md"), "temp");
+      await fs.unlink(path.join(stash.path, "temp.md"));
+
+      const result = await client.callTool({
+        name: "stash_list",
+        arguments: { stash: "test" },
+      });
+      const data = JSON.parse((result.content as any)[0].text);
+      expect(data.items).not.toContain("temp.md");
+    });
   });
 });

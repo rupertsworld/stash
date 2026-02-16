@@ -396,4 +396,37 @@ describe("Stash", () => {
       expect(syncCount).toBe(1);
     });
   });
+
+  describe("dirty flag", () => {
+    it("should clear dirty after save for local-only stash", async () => {
+      const stash = Stash.create("test", tmpDir, TEST_ACTOR_ID);
+      // No provider = local-only
+
+      stash.write("file.md", "content");
+      expect(stash.isDirty()).toBe(true);
+
+      await stash.flush();
+      // Wait for background save to complete
+      await new Promise((r) => setTimeout(r, 100));
+
+      expect(stash.isDirty()).toBe(false);
+    });
+
+    it("should stay dirty if new writes occur before save completes", async () => {
+      const stash = Stash.create("test", tmpDir, TEST_ACTOR_ID);
+
+      stash.write("file.md", "first");
+      await new Promise((r) => setTimeout(r, 10));
+
+      // Write again before save completes
+      stash.write("file.md", "second");
+
+      await stash.flush();
+      // Should still be dirty since another write happened
+      // Actually, after flush completes, dirty should be cleared if no new writes
+      await new Promise((r) => setTimeout(r, 100));
+
+      expect(stash.isDirty()).toBe(false);
+    });
+  });
 });

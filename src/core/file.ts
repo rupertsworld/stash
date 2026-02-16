@@ -1,4 +1,5 @@
 import * as Automerge from "@automerge/automerge";
+import { splice } from "@automerge/automerge/next";
 
 // Text files: character-level CRDT
 export interface TextFileDoc {
@@ -49,9 +50,8 @@ export function setContent(
 ): Automerge.Doc<TextFileDoc> {
   if (doc.type !== "text") throw new Error("Cannot set content of binary file");
   return Automerge.change(doc as Automerge.Doc<TextFileDoc>, (d) => {
-    const len = d.content.length;
-    if (len > 0) d.content.deleteAt(0, len);
-    if (content.length > 0) d.content.insertAt(0, ...content.split(""));
+    // Use splice for efficient bulk replacement (avoids N separate operations)
+    splice(d, ["content"], 0, d.content.length, content);
   });
 }
 
@@ -63,9 +63,8 @@ export function applyPatch(
 ): Automerge.Doc<TextFileDoc> {
   if (doc.type !== "text") throw new Error("Cannot patch binary file");
   return Automerge.change(doc as Automerge.Doc<TextFileDoc>, (d) => {
-    const deleteCount = end - start;
-    if (deleteCount > 0) d.content.deleteAt(start, deleteCount);
-    if (text.length > 0) d.content.insertAt(start, ...text.split(""));
+    // Use splice for efficient patch (avoids N separate operations)
+    splice(d, ["content"], start, end - start, text);
   });
 }
 

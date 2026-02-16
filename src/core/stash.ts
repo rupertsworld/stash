@@ -40,6 +40,7 @@ export class Stash {
   private meta: StashMeta;
   private actorId: string;
   private dirty = false;
+  private saveGeneration = 0;
   private savePromise: Promise<void> | null = null;
   private syncTimeout: ReturnType<typeof setTimeout> | null = null;
   private syncing = false;
@@ -641,15 +642,24 @@ export class Stash {
 
   private scheduleBackgroundSave(): void {
     this.dirty = true;
+    this.saveGeneration++;
+    const generationAtSchedule = this.saveGeneration;
 
     const previousSave = this.savePromise ?? Promise.resolve();
     this.savePromise = previousSave.then(() =>
-      this.save().catch((err) => {
-        console.error(
-          `Save failed for ${this.name}:`,
-          (err as Error).message,
-        );
-      }),
+      this.save()
+        .then(() => {
+          // Clear dirty only if no new writes since we scheduled
+          if (this.saveGeneration === generationAtSchedule) {
+            this.dirty = false;
+          }
+        })
+        .catch((err) => {
+          console.error(
+            `Save failed for ${this.name}:`,
+            (err as Error).message,
+          );
+        }),
     );
 
     if (this.syncTimeout) {
@@ -657,16 +667,12 @@ export class Stash {
     }
     this.syncTimeout = setTimeout(() => {
       this.syncTimeout = null;
-      this.sync()
-        .then(() => {
-          this.dirty = false;
-        })
-        .catch((err) => {
-          console.error(
-            `Sync failed for ${this.name}:`,
-            (err as Error).message,
-          );
-        });
+      this.sync().catch((err) => {
+        console.error(
+          `Sync failed for ${this.name}:`,
+          (err as Error).message,
+        );
+      });
     }, Stash.SYNC_DEBOUNCE_MS);
   }
 }

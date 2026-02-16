@@ -1,5 +1,6 @@
 import * as fs from "node:fs/promises";
 import * as nodePath from "node:path";
+import { minimatch } from "minimatch";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import {
   CallToolRequestSchema,
@@ -145,8 +146,8 @@ export function createMcpServer(manager: StashManager): Server {
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args } = request.params;
 
-    // Reload to pick up external changes before each operation
-    await manager.reload();
+    // Reload to pick up external changes (throttled to avoid excessive I/O)
+    await manager.reloadIfStale();
 
     switch (name) {
       case "stash_list":
@@ -185,12 +186,12 @@ function jsonResponse(data: unknown) {
   };
 }
 
-function handleList(
+async function handleList(
   manager: StashManager,
   args: Record<string, unknown> | undefined,
 ) {
   const stashName = args?.stash as string | undefined;
-  const path = args?.path as string | undefined;
+  const dirPath = args?.path as string | undefined;
 
   if (!stashName) {
     // List all stashes with details
@@ -210,11 +211,12 @@ function handleList(
   const stash = manager.get(stashName);
   if (!stash) return errorResponse(`Stash not found: ${stashName}`);
 
-  const items = stash.list(path || undefined);
+  // Read from filesystem for consistency with read/write
+  const items = await listFilesystem(stash.path, dirPath || "");
   return jsonResponse({ items });
 }
 
-function handleGlob(
+async function handleGlob(
   manager: StashManager,
   args: Record<string, unknown> | undefined,
 ) {
@@ -228,7 +230,8 @@ function handleGlob(
   const stash = manager.get(stashName);
   if (!stash) return errorResponse(`Stash not found: ${stashName}`);
 
-  const files = stash.glob(pattern);
+  // Read from filesystem for consistency with read/write
+  const files = await globFilesystem(stash.path, pattern);
   return jsonResponse({ files });
 }
 
@@ -398,12 +401,8 @@ async function handleGrep(
   const stash = manager.get(stashName);
   if (!stash) return errorResponse(`Stash not found: ${stashName}`);
 
-  let filePaths: string[];
-  if (globPattern) {
-    filePaths = stash.glob(globPattern);
-  } else {
-    filePaths = stash.glob("**/*");
-  }
+  // Read from filesystem for consistency
+  const filePaths = await globFilesystem(stash.path, globPattern || "**/*");
 
   const regex = new RegExp(pattern);
   const matches: Array<{ path: string; line: number; content: string }> = [];
@@ -428,4 +427,61 @@ async function handleGrep(
   }
 
   return jsonResponse({ matches });
+}
+
+// --- Filesystem helpers for consistent MCP behavior ---
+
+async function listFilesystem(rootPath: string, dirPath: string): Promise<string[]> {
+  const fullPath = dirPath ? nodePath.join(rootPath, dirPath) : rootPath;
+  const items = new Set<string>();
+
+  try {
+    const entries = await fs.readdir(fullPath, { withFileTypes: true });
+    for (const entry of entries) {
+      if (entry.name === ".stash" || entry.name.startsWith(".")) continue;
+      if (entry.isDirectory()) {
+        items.add(entry.name + "/");
+      } else if (entry.isFile()) {
+        items.add(entry.name);
+      }
+    }
+  } catch {
+    // Directory might not exist
+  }
+
+  return [...items].sort();
+}
+
+async function globFilesystem(rootPath: string, pattern: string): Promise<string[]> {
+  const allFiles = await walkFilesystem(rootPath, "");
+  return allFiles.filter((p) => minimatch(p, pattern)).sort();
+}
+
+async function walkFilesystem(rootPath: string, relativePath: string): Promise<string[]> {
+  const results: string[] = [];
+  const fullPath = relativePath ? nodePath.join(rootPath, relativePath) : rootPath;
+
+  let entries;
+  try {
+    entries = await fs.readdir(fullPath, { withFileTypes: true });
+  } catch {
+    return results;
+  }
+
+  for (const entry of entries) {
+    if (entry.name === ".stash" || entry.name.startsWith(".")) continue;
+
+    const childRelative = relativePath
+      ? `${relativePath}/${entry.name}`
+      : entry.name;
+
+    if (entry.isDirectory()) {
+      const subFiles = await walkFilesystem(rootPath, childRelative);
+      results.push(...subFiles);
+    } else if (entry.isFile()) {
+      results.push(childRelative);
+    }
+  }
+
+  return results;
 }

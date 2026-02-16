@@ -299,4 +299,93 @@ describe("StashManager", () => {
       expect(stash.read("real.md")).toBe("real");
     });
   });
+
+  describe("reloadIfStale", () => {
+    it("should reload on first call", async () => {
+      const manager = await StashManager.load(tmpDir);
+      await manager.create("test");
+      expect(manager.list()).toEqual(["test"]);
+
+      // Delete the stash from manager's view (simulate external change)
+      // by creating a second manager and deleting
+      const manager2 = await StashManager.load(tmpDir);
+      await manager2.delete("test");
+
+      // First manager should still see "test" until reload
+      expect(manager.list()).toEqual(["test"]);
+
+      // reloadIfStale should reload on first call
+      await manager.reloadIfStale();
+      expect(manager.list()).toEqual([]);
+    });
+
+    it("should skip reload if called again within threshold", async () => {
+      const manager = await StashManager.load(tmpDir);
+      await manager.create("test");
+
+      // Force a reload
+      await manager.reloadIfStale();
+      expect(manager.list()).toEqual(["test"]);
+
+      // Create another stash via second manager
+      const manager2 = await StashManager.load(tmpDir);
+      await manager2.create("other");
+
+      // Second call within threshold should skip reload
+      await manager.reloadIfStale();
+      expect(manager.list()).toEqual(["test"]); // Should not see "other" yet
+
+      // Wait for threshold and reload again
+      await new Promise(r => setTimeout(r, 2100));
+      await manager.reloadIfStale();
+      expect(manager.list()).toContain("other");
+    });
+  });
+
+  describe("name validation", () => {
+    it("should accept valid names", async () => {
+      const manager = await StashManager.load(tmpDir);
+
+      await expect(manager.create("my-stash")).resolves.toBeDefined();
+      await expect(manager.create("stash.v2")).resolves.toBeDefined();
+      await expect(manager.create("Notes_2026")).resolves.toBeDefined();
+      await expect(manager.create("a")).resolves.toBeDefined();
+      await expect(manager.create("A1")).resolves.toBeDefined();
+    });
+
+    it("should reject path traversal attempts", async () => {
+      const manager = await StashManager.load(tmpDir);
+
+      await expect(manager.create("../etc")).rejects.toThrow();
+      await expect(manager.create("foo/bar")).rejects.toThrow();
+      await expect(manager.create("..")).rejects.toThrow();
+      await expect(manager.create("foo/../bar")).rejects.toThrow();
+    });
+
+    it("should reject hidden names (starting with dot)", async () => {
+      const manager = await StashManager.load(tmpDir);
+
+      await expect(manager.create(".hidden")).rejects.toThrow();
+      await expect(manager.create(".")).rejects.toThrow();
+    });
+
+    it("should reject names starting with dash", async () => {
+      const manager = await StashManager.load(tmpDir);
+
+      await expect(manager.create("-dash")).rejects.toThrow();
+    });
+
+    it("should reject empty names", async () => {
+      const manager = await StashManager.load(tmpDir);
+
+      await expect(manager.create("")).rejects.toThrow();
+    });
+
+    it("should reject overly long names", async () => {
+      const manager = await StashManager.load(tmpDir);
+      const longName = "a".repeat(65);
+
+      await expect(manager.create(longName)).rejects.toThrow();
+    });
+  });
 });

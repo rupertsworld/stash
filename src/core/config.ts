@@ -22,7 +22,8 @@ export function configPath(baseDir: string = DEFAULT_STASH_DIR): string {
 export async function ensureConfig(
   baseDir: string = DEFAULT_STASH_DIR,
 ): Promise<GlobalConfig> {
-  await fs.mkdir(baseDir, { recursive: true });
+  // Create directory with restrictive permissions (owner only)
+  await fs.mkdir(baseDir, { recursive: true, mode: 0o700 });
 
   const cfgPath = configPath(baseDir);
   let config: GlobalConfig;
@@ -45,7 +46,8 @@ export async function ensureConfig(
   }
 
   if (needsWrite) {
-    await fs.writeFile(cfgPath, JSON.stringify(config, null, 2) + "\n");
+    // Write config with restrictive permissions (contains tokens)
+    await fs.writeFile(cfgPath, JSON.stringify(config, null, 2) + "\n", { mode: 0o600 });
   }
 
   return config;
@@ -62,8 +64,8 @@ export async function writeConfig(
   baseDir: string = DEFAULT_STASH_DIR,
 ): Promise<void> {
   const filePath = configPath(baseDir);
-  await fs.mkdir(path.dirname(filePath), { recursive: true });
-  await fs.writeFile(filePath, JSON.stringify(config, null, 2) + "\n");
+  await fs.mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 });
+  await fs.writeFile(filePath, JSON.stringify(config, null, 2) + "\n", { mode: 0o600 });
 }
 
 export async function getGitHubToken(

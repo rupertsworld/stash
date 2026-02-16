@@ -63,6 +63,8 @@ Available tools:
 | `stash_write` | Write or patch a file |
 | `stash_delete` | Delete a file |
 | `stash_move` | Move/rename a file |
+| `stash_edit` | Replace text in a file |
+| `stash_grep` | Search file contents |
 
 Example usage:
 ```
@@ -72,6 +74,15 @@ stash_list({ stash: "notes", path: "subdir/" })      // list files in subdir
 stash_read({ stash: "notes", path: "todo.md" })      // read a file
 stash_write({ stash: "notes", path: "todo.md", content: "..." })
 ```
+
+## Architecture
+
+See [spec/SPEC.md](spec/SPEC.md) for detailed system documentation.
+
+Key features:
+- **Filesystem-first**: Edit files normally, reconciler syncs to CRDTs
+- **Soft-delete**: Deleted files become tombstones for proper sync
+- **Content-wins**: When conflicts arise, content beats deletion
 
 ## Requirements
 

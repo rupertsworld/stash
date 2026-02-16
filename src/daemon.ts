@@ -3,6 +3,8 @@
  * Uses StashReconciler for file watching and automatic sync.
  */
 
+import * as fs from "node:fs/promises";
+import * as path from "node:path";
 import express from "express";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { createMcpServer } from "./mcp.js";
@@ -14,11 +16,29 @@ import type { Stash } from "./core/stash.js";
 export const PORT = 32847;
 const SYNC_INTERVAL_MS = 30_000;
 
+export function pidFilePath(baseDir: string = DEFAULT_STASH_DIR): string {
+  return path.join(baseDir, "daemon.pid");
+}
+
+async function writePidFile(baseDir: string): Promise<void> {
+  await fs.writeFile(pidFilePath(baseDir), String(process.pid), { mode: 0o600 });
+}
+
+async function removePidFile(baseDir: string): Promise<void> {
+  try {
+    await fs.unlink(pidFilePath(baseDir));
+  } catch {
+    // Ignore if already removed
+  }
+}
+
 export async function startDaemon(
   baseDir: string = DEFAULT_STASH_DIR,
 ): Promise<void> {
   const manager = await StashManager.load(baseDir);
-  const mcpServer = createMcpServer(manager);
+
+  // Write PID file for stop command
+  await writePidFile(baseDir);
 
   const reconcilers = new Map<string, StashReconciler>();
 
@@ -28,6 +48,7 @@ export async function startDaemon(
     if (stash) {
       const reconciler = new StashReconciler(stash);
       await reconciler.start();
+      await reconciler.scan();  // Import existing files from disk
       reconcilers.set(name, reconciler);
     }
   }
@@ -35,13 +56,15 @@ export async function startDaemon(
   const app = express();
   app.use(express.json());
 
-  // MCP endpoint
+  // MCP endpoint - create fresh server per request to avoid race conditions
   app.post("/mcp", async (req, res) => {
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined, // Stateless
     });
+    // Create fresh MCP server for this request (avoids transport race on concurrent requests)
+    const requestServer = createMcpServer(manager);
     res.on("close", () => transport.close());
-    await mcpServer.connect(transport);
+    await requestServer.connect(transport);
     await transport.handleRequest(req, res, req.body);
   });
 
@@ -80,6 +103,7 @@ export async function startDaemon(
       await reconciler.close();
     }
     reconcilers.clear();
+    await removePidFile(baseDir);
     process.exit(0);
   });
 }
