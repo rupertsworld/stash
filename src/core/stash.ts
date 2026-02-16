@@ -14,28 +14,30 @@ import {
 } from "./structure.js";
 import {
   createFileDoc,
+  createBinaryFileDoc,
   getContent,
   setContent,
   applyPatch,
   type FileDoc,
+  type BinaryFileDoc,
 } from "./file.js";
 import type { SyncProvider } from "../providers/types.js";
 import { withRetry } from "./errors.js";
 
 export interface StashMeta {
-  localName: string;
-  provider: string | null;
-  key: string | null;
-  actorId: string;
+  name: string;
+  description?: string;
+  remote?: string | null; // e.g., "github:user/repo"
 }
 
 export class Stash {
   readonly name: string;
+  readonly path: string; // absolute path to stash root
   private structureDoc: Automerge.Doc<StructureDoc>;
   private fileDocs: Map<string, Automerge.Doc<FileDoc>>;
   private provider: SyncProvider | null;
-  private baseDir: string;
   private meta: StashMeta;
+  private actorId: string;
   private dirty = false;
   private savePromise: Promise<void> | null = null;
   private syncTimeout: ReturnType<typeof setTimeout> | null = null;
@@ -44,53 +46,59 @@ export class Stash {
 
   constructor(
     name: string,
-    baseDir: string,
+    stashPath: string,
     structureDoc: Automerge.Doc<StructureDoc>,
     fileDocs: Map<string, Automerge.Doc<FileDoc>>,
     meta: StashMeta,
+    actorId: string,
     provider: SyncProvider | null = null,
   ) {
     this.name = name;
-    this.baseDir = baseDir;
+    this.path = stashPath;
     this.structureDoc = structureDoc;
     this.fileDocs = fileDocs;
     this.meta = meta;
+    this.actorId = actorId;
     this.provider = provider;
+  }
+
+  private getHexActorId(): string {
+    return Buffer.from(this.actorId).toString("hex").padEnd(64, "0");
   }
 
   static create(
     name: string,
-    baseDir: string,
+    stashPath: string,
+    actorId: string,
     provider: SyncProvider | null = null,
-    providerType: string | null = null,
-    key: string | null = null,
+    remote: string | null = null,
+    description?: string,
   ): Stash {
-    const actorId = ulid();
-    // Convert ULID to hex for Automerge (pad to 64 hex chars)
     const hexActorId = Buffer.from(actorId).toString("hex").padEnd(64, "0");
     const structureDoc = createStructureDoc(hexActorId);
     const meta: StashMeta = {
-      localName: name,
-      provider: providerType,
-      key,
-      actorId,
+      name,
+      description,
+      remote,
     };
     return new Stash(
       name,
-      baseDir,
+      stashPath,
       structureDoc,
       new Map(),
       meta,
+      actorId,
       provider,
     );
   }
 
   static async load(
     name: string,
-    baseDir: string,
+    stashPath: string,
+    actorId: string,
     provider: SyncProvider | null = null,
   ): Promise<Stash> {
-    const stashDir = path.join(baseDir, name);
+    const stashDir = path.join(stashPath, ".stash");
 
     // Read meta
     const metaData = await fs.readFile(
@@ -119,7 +127,7 @@ export class Stash {
       for (const entry of entries) {
         if (!entry.endsWith(".automerge")) continue;
         const docId = entry.replace(".automerge", "");
-        if (!referencedDocIds.has(docId)) continue; // Skip orphans
+        if (!referencedDocIds.has(docId)) continue;
         const docBin = await fs.readFile(path.join(docsDir, entry));
         fileDocs.set(docId, Automerge.load<FileDoc>(new Uint8Array(docBin)));
       }
@@ -127,9 +135,36 @@ export class Stash {
       // docs dir might not exist yet
     }
 
-    return new Stash(name, baseDir, structureDoc, fileDocs, meta, provider);
+    return new Stash(name, stashPath, structureDoc, fileDocs, meta, actorId, provider);
   }
 
+  // --- File enumeration ---
+  listAllFiles(): Array<[string, string]> {
+    const result: Array<[string, string]> = [];
+    for (const filePath of listPaths(this.structureDoc)) {
+      const entry = getEntry(this.structureDoc, filePath);
+      if (entry) result.push([filePath, entry.docId]);
+    }
+    return result;
+  }
+
+  // --- Doc access ---
+  getDocId(relativePath: string): string | null {
+    const entry = getEntry(this.structureDoc, relativePath);
+    return entry?.docId ?? null;
+  }
+
+  getFileDoc(docId: string): Automerge.Doc<FileDoc> | null {
+    return this.fileDocs.get(docId) ?? null;
+  }
+
+  getFileDocByPath(relativePath: string): Automerge.Doc<FileDoc> | null {
+    const docId = this.getDocId(relativePath);
+    if (!docId) return null;
+    return this.getFileDoc(docId);
+  }
+
+  // --- Read content ---
   read(filePath: string): string {
     const entry = getEntry(this.structureDoc, filePath);
     if (!entry) throw new Error(`File not found: ${filePath}`);
@@ -138,24 +173,37 @@ export class Stash {
     return getContent(doc);
   }
 
+  // --- Write operations ---
   write(filePath: string, content: string): void {
     const entry = getEntry(this.structureDoc, filePath);
     if (entry) {
-      // Update existing file
       const doc = this.fileDocs.get(entry.docId);
       if (doc) {
         this.fileDocs.set(entry.docId, setContent(doc, content));
       }
     } else {
-      // Create new file
-      const hexActorId = Buffer.from(this.meta.actorId)
-        .toString("hex")
-        .padEnd(64, "0");
+      const hexActorId = this.getHexActorId();
       const result = addFile(this.structureDoc, filePath);
+      this.structureDoc = result.doc;
+      this.fileDocs.set(result.docId, createFileDoc(content, hexActorId));
+    }
+    this.scheduleBackgroundSave();
+  }
+
+  writeBinary(relativePath: string, hash: string, size: number): void {
+    const entry = getEntry(this.structureDoc, relativePath);
+    const hexActorId = this.getHexActorId();
+    if (entry) {
+      this.fileDocs.set(
+        entry.docId,
+        createBinaryFileDoc(hash, size, hexActorId),
+      );
+    } else {
+      const result = addFile(this.structureDoc, relativePath);
       this.structureDoc = result.doc;
       this.fileDocs.set(
         result.docId,
-        createFileDoc(content, hexActorId),
+        createBinaryFileDoc(hash, size, hexActorId),
       );
     }
     this.scheduleBackgroundSave();
@@ -174,7 +222,6 @@ export class Stash {
     const entry = getEntry(this.structureDoc, filePath);
     if (!entry) throw new Error(`File not found: ${filePath}`);
     this.structureDoc = removeFile(this.structureDoc, filePath);
-    // Orphan the file doc (remove from memory, leave on disk)
     this.fileDocs.delete(entry.docId);
     this.scheduleBackgroundSave();
   }
@@ -186,11 +233,46 @@ export class Stash {
     this.scheduleBackgroundSave();
   }
 
+  renameFile(oldPath: string, newPath: string): void {
+    this.move(oldPath, newPath);
+  }
+
+  // --- Doc manipulation (for snapshot-based merge) ---
+  setFileDoc(relativePath: string, doc: Automerge.Doc<FileDoc>): void {
+    const entry = getEntry(this.structureDoc, relativePath);
+    if (!entry) throw new Error(`File not found: ${relativePath}`);
+    this.fileDocs.set(entry.docId, doc);
+  }
+
+  cloneFileDoc(docId: string): Automerge.Doc<FileDoc> {
+    const doc = this.fileDocs.get(docId);
+    if (!doc) throw new Error(`Doc not found: ${docId}`);
+    return Automerge.clone(doc);
+  }
+
+  // --- Binary support ---
+  isHashReferenced(hash: string): boolean {
+    for (const [, docId] of this.listAllFiles()) {
+      const doc = this.fileDocs.get(docId);
+      if (doc && doc.type === "binary" && (doc as BinaryFileDoc).hash === hash) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  setBinaryMeta(
+    relativePath: string,
+    meta: { type: "binary"; hash: string; size: number },
+  ): void {
+    this.writeBinary(relativePath, meta.hash, meta.size);
+  }
+
+  // --- Directory listing ---
   list(dir?: string): string[] {
     const allPaths = listPaths(this.structureDoc);
 
     if (!dir || dir === "") {
-      // List immediate children of root
       const items = new Set<string>();
       for (const p of allPaths) {
         const parts = p.split("/");
@@ -203,7 +285,6 @@ export class Stash {
       return [...items].sort();
     }
 
-    // Normalize dir to end with /
     const prefix = dir.endsWith("/") ? dir : dir + "/";
     const items = new Set<string>();
     for (const p of allPaths) {
@@ -224,13 +305,14 @@ export class Stash {
     return allPaths.filter((p) => minimatch(p, pattern)).sort();
   }
 
+  // --- Sync ---
   isSyncing(): boolean {
     return this.syncing;
   }
 
   async sync(): Promise<void> {
     if (!this.provider) return;
-    if (this.syncing) return; // Already syncing
+    if (this.syncing) return;
 
     this.syncing = true;
     try {
@@ -241,33 +323,26 @@ export class Stash {
   }
 
   private async doSync(): Promise<void> {
-    // 1. Pre-sync: create empty docs for dangling refs
     for (const [filePath, entry] of Object.entries(this.structureDoc.files)) {
       if (!this.fileDocs.has(entry.docId)) {
         console.warn(`Creating empty doc for dangling ref: ${filePath}`);
-        const hexActorId = Buffer.from(this.meta.actorId)
-          .toString("hex")
-          .padEnd(64, "0");
+        const hexActorId = this.getHexActorId();
         this.fileDocs.set(entry.docId, createFileDoc("", hexActorId));
       }
     }
 
-    // 2. Gather all local documents
     const localDocs = new Map<string, Uint8Array>();
     localDocs.set("structure", Automerge.save(this.structureDoc));
     for (const [docId, fileDoc] of this.fileDocs) {
       localDocs.set(docId, Automerge.save(fileDoc));
     }
 
-    // 3. Provider syncs with retry
     const mergedDocs = await withRetry(() => this.provider!.sync(localDocs));
 
-    // 4. Load merged structure
     this.structureDoc = Automerge.load<StructureDoc>(
       mergedDocs.get("structure")!,
     );
 
-    // 5. Load only referenced file docs
     const referencedDocIds = new Set(
       Object.values(this.structureDoc.files).map((f) => f.docId),
     );
@@ -279,28 +354,25 @@ export class Stash {
       }
     }
 
-    // 6. Persist
     await this.save();
   }
 
+  // --- Persistence ---
   async save(): Promise<void> {
-    const stashDir = path.join(this.baseDir, this.name);
+    const stashDir = path.join(this.path, ".stash");
     const docsDir = path.join(stashDir, "docs");
     await fs.mkdir(docsDir, { recursive: true });
 
-    // Write meta.json
     await atomicWrite(
       path.join(stashDir, "meta.json"),
       JSON.stringify(this.meta, null, 2) + "\n",
     );
 
-    // Write structure doc
     await atomicWriteBinary(
       path.join(stashDir, "structure.automerge"),
       Automerge.save(this.structureDoc),
     );
 
-    // Write file docs
     for (const [docId, doc] of this.fileDocs) {
       await atomicWriteBinary(
         path.join(docsDir, `${docId}.automerge`),
@@ -309,8 +381,28 @@ export class Stash {
     }
   }
 
+  scheduleSync(): void {
+    if (this.syncTimeout) {
+      clearTimeout(this.syncTimeout);
+    }
+    this.syncTimeout = setTimeout(() => {
+      this.syncTimeout = null;
+      this.sync().catch((err) => {
+        console.error(
+          `Sync failed for ${this.name}:`,
+          (err as Error).message,
+        );
+      });
+    }, Stash.SYNC_DEBOUNCE_MS);
+  }
+
   getMeta(): StashMeta {
     return { ...this.meta };
+  }
+
+  setMeta(meta: Partial<StashMeta>): void {
+    if (meta.description !== undefined) this.meta.description = meta.description;
+    if (meta.remote !== undefined) this.meta.remote = meta.remote;
   }
 
   getProvider(): SyncProvider | null {
@@ -321,14 +413,14 @@ export class Stash {
     this.provider = provider;
   }
 
+  getActorId(): string {
+    return this.actorId;
+  }
+
   isDirty(): boolean {
     return this.dirty;
   }
 
-  /**
-   * Wait for any pending background saves to complete.
-   * Useful for tests.
-   */
   async flush(): Promise<void> {
     if (this.savePromise) {
       await this.savePromise;
@@ -338,15 +430,16 @@ export class Stash {
   private scheduleBackgroundSave(): void {
     this.dirty = true;
 
-    // Chain saves to ensure they complete in order
     const previousSave = this.savePromise ?? Promise.resolve();
     this.savePromise = previousSave.then(() =>
       this.save().catch((err) => {
-        console.error(`Save failed for ${this.name}:`, (err as Error).message);
-      })
+        console.error(
+          `Save failed for ${this.name}:`,
+          (err as Error).message,
+        );
+      }),
     );
 
-    // Debounce sync
     if (this.syncTimeout) {
       clearTimeout(this.syncTimeout);
     }
@@ -357,7 +450,10 @@ export class Stash {
           this.dirty = false;
         })
         .catch((err) => {
-          console.error(`Sync failed for ${this.name}:`, (err as Error).message);
+          console.error(
+            `Sync failed for ${this.name}:`,
+            (err as Error).message,
+          );
         });
     }, Stash.SYNC_DEBOUNCE_MS);
   }

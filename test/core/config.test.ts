@@ -3,10 +3,13 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import * as os from "node:os";
 import {
+  ensureConfig,
   readConfig,
   writeConfig,
   getGitHubToken,
   setGitHubToken,
+  registerStash,
+  unregisterStash,
 } from "../../src/core/config.js";
 
 describe("Config", () => {
@@ -20,45 +23,110 @@ describe("Config", () => {
     await fs.rm(tmpDir, { recursive: true, force: true });
   });
 
-  it("should return empty config when file doesn't exist", async () => {
-    const config = await readConfig(tmpDir);
-    expect(config).toEqual({});
+  describe("ensureConfig", () => {
+    it("should create config on first run", async () => {
+      const config = await ensureConfig(tmpDir);
+      expect(config.actorId).toBeTruthy();
+      expect(config.stashes).toEqual({});
+    });
+
+    it("should generate actorId", async () => {
+      const config = await ensureConfig(tmpDir);
+      expect(config.actorId).toBeTruthy();
+      expect(typeof config.actorId).toBe("string");
+    });
+
+    it("should preserve existing config", async () => {
+      const initial = await ensureConfig(tmpDir);
+      const second = await ensureConfig(tmpDir);
+      expect(second.actorId).toBe(initial.actorId);
+    });
+
+    it("should add actorId to existing config without one", async () => {
+      await fs.writeFile(
+        path.join(tmpDir, "config.json"),
+        JSON.stringify({ stashes: {} }),
+      );
+      const config = await ensureConfig(tmpDir);
+      expect(config.actorId).toBeTruthy();
+      expect(config.stashes).toEqual({});
+    });
+
+    it("should initialize empty stashes map", async () => {
+      const config = await ensureConfig(tmpDir);
+      expect(config.stashes).toEqual({});
+    });
   });
 
-  it("should write and read config", async () => {
-    await writeConfig({ github: { token: "ghp_test123" } }, tmpDir);
-    const config = await readConfig(tmpDir);
-    expect(config.github?.token).toBe("ghp_test123");
+  describe("readConfig / writeConfig", () => {
+    it("should write and read config", async () => {
+      const config = await readConfig(tmpDir);
+      config.providers = { github: { token: "ghp_test123" } };
+      await writeConfig(config, tmpDir);
+      const read = await readConfig(tmpDir);
+      expect(read.providers?.github?.token).toBe("ghp_test123");
+    });
+
+    it("should create config directory if needed", async () => {
+      const nestedDir = path.join(tmpDir, "nested", "dir");
+      const config = await ensureConfig(nestedDir);
+      config.providers = { github: { token: "test" } };
+      await writeConfig(config, nestedDir);
+      const read = await readConfig(nestedDir);
+      expect(read.providers?.github?.token).toBe("test");
+    });
   });
 
-  it("should create config directory if needed", async () => {
-    const nestedDir = path.join(tmpDir, "nested", "dir");
-    await writeConfig({ github: { token: "test" } }, nestedDir);
-    const config = await readConfig(nestedDir);
-    expect(config.github?.token).toBe("test");
+  describe("GitHub token", () => {
+    it("should get GitHub token", async () => {
+      const config = await ensureConfig(tmpDir);
+      config.providers = { github: { token: "ghp_abc" } };
+      await writeConfig(config, tmpDir);
+      const token = await getGitHubToken(tmpDir);
+      expect(token).toBe("ghp_abc");
+    });
+
+    it("should return undefined when no GitHub token", async () => {
+      await ensureConfig(tmpDir);
+      const token = await getGitHubToken(tmpDir);
+      expect(token).toBeUndefined();
+    });
+
+    it("should set GitHub token", async () => {
+      await setGitHubToken("ghp_new_token", tmpDir);
+      const token = await getGitHubToken(tmpDir);
+      expect(token).toBe("ghp_new_token");
+    });
+
+    it("should overwrite GitHub token", async () => {
+      await setGitHubToken("old_token", tmpDir);
+      await setGitHubToken("new_token", tmpDir);
+      const token = await getGitHubToken(tmpDir);
+      expect(token).toBe("new_token");
+    });
   });
 
-  it("should get GitHub token", async () => {
-    await writeConfig({ github: { token: "ghp_abc" } }, tmpDir);
-    const token = await getGitHubToken(tmpDir);
-    expect(token).toBe("ghp_abc");
-  });
+  describe("stash registry", () => {
+    it("should add stash to registry", async () => {
+      await ensureConfig(tmpDir);
+      await registerStash("notes", "/path/to/notes", tmpDir);
+      const config = await readConfig(tmpDir);
+      expect(config.stashes.notes).toBe("/path/to/notes");
+    });
 
-  it("should return undefined when no GitHub token", async () => {
-    const token = await getGitHubToken(tmpDir);
-    expect(token).toBeUndefined();
-  });
+    it("should remove stash from registry", async () => {
+      await ensureConfig(tmpDir);
+      await registerStash("notes", "/path/to/notes", tmpDir);
+      await unregisterStash("notes", tmpDir);
+      const config = await readConfig(tmpDir);
+      expect(config.stashes.notes).toBeUndefined();
+    });
 
-  it("should set GitHub token", async () => {
-    await setGitHubToken("ghp_new_token", tmpDir);
-    const token = await getGitHubToken(tmpDir);
-    expect(token).toBe("ghp_new_token");
-  });
-
-  it("should overwrite GitHub token", async () => {
-    await setGitHubToken("old_token", tmpDir);
-    await setGitHubToken("new_token", tmpDir);
-    const token = await getGitHubToken(tmpDir);
-    expect(token).toBe("new_token");
+    it("should handle stashes at custom paths", async () => {
+      await ensureConfig(tmpDir);
+      await registerStash("work", "/home/user/Repos/work-docs", tmpDir);
+      const config = await readConfig(tmpDir);
+      expect(config.stashes.work).toBe("/home/user/Repos/work-docs");
+    });
   });
 });

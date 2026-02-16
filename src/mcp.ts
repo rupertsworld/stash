@@ -1,3 +1,5 @@
+import * as fs from "node:fs/promises";
+import * as nodePath from "node:path";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import {
   CallToolRequestSchema,
@@ -16,7 +18,7 @@ export function createMcpServer(manager: StashManager): Server {
       {
         name: "stash_list",
         description:
-          "List stashes or files within a stash. No stash = list all stashes. With stash = list files at path (or root if no path).",
+          "List stashes or directory contents. No stash = list all stashes with name, description, path. With stash = list files at path (or root if no path).",
         inputSchema: {
           type: "object" as const,
           properties: {
@@ -35,12 +37,12 @@ export function createMcpServer(manager: StashManager): Server {
           type: "object" as const,
           properties: {
             stash: { type: "string", description: "Stash name" },
-            pattern: {
+            glob: {
               type: "string",
               description: 'Glob pattern (e.g., "**/*.md")',
             },
           },
-          required: ["stash", "pattern"],
+          required: ["stash", "glob"],
         },
       },
       {
@@ -57,8 +59,7 @@ export function createMcpServer(manager: StashManager): Server {
       },
       {
         name: "stash_write",
-        description:
-          "Write or update a file. Provide content for full replacement or patch for partial edit.",
+        description: "Write file (full content replacement). Creates file if it doesn't exist.",
         inputSchema: {
           type: "object" as const,
           properties: {
@@ -66,20 +67,31 @@ export function createMcpServer(manager: StashManager): Server {
             path: { type: "string", description: "File path within stash" },
             content: {
               type: "string",
-              description: "Full content (creates file if new)",
-            },
-            patch: {
-              type: "object",
-              description: "Partial edit (file must exist)",
-              properties: {
-                start: { type: "number" },
-                end: { type: "number" },
-                text: { type: "string" },
-              },
-              required: ["start", "end", "text"],
+              description: "Full file content",
             },
           },
-          required: ["stash", "path"],
+          required: ["stash", "path", "content"],
+        },
+      },
+      {
+        name: "stash_edit",
+        description:
+          "Edit file with text replacement. old_string must be unique in the file.",
+        inputSchema: {
+          type: "object" as const,
+          properties: {
+            stash: { type: "string", description: "Stash name" },
+            path: { type: "string", description: "File path within stash" },
+            old_string: {
+              type: "string",
+              description: "Text to replace (must be unique in file)",
+            },
+            new_string: {
+              type: "string",
+              description: "Replacement text",
+            },
+          },
+          required: ["stash", "path", "old_string", "new_string"],
         },
       },
       {
@@ -108,6 +120,25 @@ export function createMcpServer(manager: StashManager): Server {
           required: ["stash", "from", "to"],
         },
       },
+      {
+        name: "stash_grep",
+        description: "Search file contents with regex pattern.",
+        inputSchema: {
+          type: "object" as const,
+          properties: {
+            stash: { type: "string", description: "Stash name" },
+            pattern: {
+              type: "string",
+              description: "Regex pattern to search for",
+            },
+            glob: {
+              type: "string",
+              description: "Optional glob pattern to filter files",
+            },
+          },
+          required: ["stash", "pattern"],
+        },
+      },
     ],
   }));
 
@@ -126,10 +157,14 @@ export function createMcpServer(manager: StashManager): Server {
         return handleRead(manager, args);
       case "stash_write":
         return handleWrite(manager, args);
+      case "stash_edit":
+        return handleEdit(manager, args);
       case "stash_delete":
         return handleDelete(manager, args);
       case "stash_move":
         return handleMove(manager, args);
+      case "stash_grep":
+        return handleGrep(manager, args);
       default:
         return errorResponse(`Unknown tool: ${name}`);
     }
@@ -158,8 +193,18 @@ function handleList(
   const path = args?.path as string | undefined;
 
   if (!stashName) {
-    // List stashes
-    return jsonResponse({ items: manager.list() });
+    // List all stashes with details
+    const stashNames = manager.list();
+    const stashes = stashNames.map((name) => {
+      const stash = manager.get(name)!;
+      const meta = stash.getMeta();
+      return {
+        name,
+        description: meta.description,
+        path: stash.path,
+      };
+    });
+    return jsonResponse({ stashes });
   }
 
   const stash = manager.get(stashName);
@@ -174,10 +219,10 @@ function handleGlob(
   args: Record<string, unknown> | undefined,
 ) {
   const stashName = args?.stash as string;
-  const pattern = args?.pattern as string;
+  const pattern = (args?.glob ?? args?.pattern) as string;
 
   if (!stashName || !pattern) {
-    return errorResponse("stash and pattern are required");
+    return errorResponse("stash and glob are required");
   }
 
   const stash = manager.get(stashName);
@@ -187,86 +232,128 @@ function handleGlob(
   return jsonResponse({ files });
 }
 
-function handleRead(
+async function handleRead(
   manager: StashManager,
   args: Record<string, unknown> | undefined,
 ) {
   const stashName = args?.stash as string;
-  const path = args?.path as string;
+  const filePath = args?.path as string;
 
-  if (!stashName || !path) {
+  if (!stashName || !filePath) {
     return errorResponse("stash and path are required");
   }
 
   const stash = manager.get(stashName);
   if (!stash) return errorResponse(`Stash not found: ${stashName}`);
 
+  // Read from filesystem
+  const diskPath = nodePath.join(stash.path, filePath);
   try {
-    const content = stash.read(path);
+    const content = await fs.readFile(diskPath, "utf-8");
     return jsonResponse({ content });
-  } catch (err) {
-    return errorResponse(`File not found: ${path}`);
+  } catch {
+    return errorResponse(`File not found: ${filePath}`);
   }
 }
 
-function handleWrite(
+async function handleWrite(
   manager: StashManager,
   args: Record<string, unknown> | undefined,
 ) {
   const stashName = args?.stash as string;
-  const path = args?.path as string;
+  const filePath = args?.path as string;
   const content = args?.content as string | undefined;
-  const patch = args?.patch as
-    | { start: number; end: number; text: string }
-    | undefined;
 
-  if (!stashName || !path) {
+  if (!stashName || !filePath) {
     return errorResponse("stash and path are required");
   }
-  if (content === undefined && !patch) {
-    return errorResponse("Must provide content or patch");
+  if (content === undefined) {
+    return errorResponse("content is required");
   }
 
   const stash = manager.get(stashName);
   if (!stash) return errorResponse(`Stash not found: ${stashName}`);
 
+  // Write to filesystem - reconciler will pick up the change
+  const diskPath = nodePath.join(stash.path, filePath);
   try {
-    if (patch) {
-      stash.patch(path, patch.start, patch.end, patch.text);
-    } else {
-      stash.write(path, content!);
-    }
-    // stash.write/patch triggers background save + debounced sync
+    await fs.mkdir(nodePath.dirname(diskPath), { recursive: true });
+    await fs.writeFile(diskPath, content);
     return jsonResponse({ success: true });
   } catch (err) {
     return errorResponse((err as Error).message);
   }
 }
 
-function handleDelete(
+async function handleEdit(
   manager: StashManager,
   args: Record<string, unknown> | undefined,
 ) {
   const stashName = args?.stash as string;
-  const path = args?.path as string;
+  const filePath = args?.path as string;
+  const oldString = args?.old_string as string;
+  const newString = args?.new_string as string;
 
-  if (!stashName || !path) {
+  if (!stashName || !filePath || oldString === undefined || newString === undefined) {
+    return errorResponse("stash, path, old_string, and new_string are required");
+  }
+
+  const stash = manager.get(stashName);
+  if (!stash) return errorResponse(`Stash not found: ${stashName}`);
+
+  const diskPath = nodePath.join(stash.path, filePath);
+  try {
+    const content = await fs.readFile(diskPath, "utf-8");
+
+    // Check old_string exists and is unique
+    const firstIndex = content.indexOf(oldString);
+    if (firstIndex === -1) {
+      return errorResponse(`old_string not found in file`);
+    }
+    const secondIndex = content.indexOf(oldString, firstIndex + 1);
+    if (secondIndex !== -1) {
+      return errorResponse(`old_string is not unique in file`);
+    }
+
+    const newContent = content.replace(oldString, newString);
+    await fs.writeFile(diskPath, newContent);
+    return jsonResponse({ success: true });
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+      return errorResponse(`File not found: ${filePath}`);
+    }
+    return errorResponse((err as Error).message);
+  }
+}
+
+async function handleDelete(
+  manager: StashManager,
+  args: Record<string, unknown> | undefined,
+) {
+  const stashName = args?.stash as string;
+  const filePath = args?.path as string;
+
+  if (!stashName || !filePath) {
     return errorResponse("stash and path are required");
   }
 
   const stash = manager.get(stashName);
   if (!stash) return errorResponse(`Stash not found: ${stashName}`);
 
+  // Delete from filesystem - reconciler will pick up the change
+  const diskPath = nodePath.join(stash.path, filePath);
   try {
-    stash.delete(path);
-    // stash.delete triggers background save + debounced sync
+    await fs.unlink(diskPath);
     return jsonResponse({ success: true });
   } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+      return errorResponse(`File not found: ${filePath}`);
+    }
     return errorResponse((err as Error).message);
   }
 }
 
-function handleMove(
+async function handleMove(
   manager: StashManager,
   args: Record<string, unknown> | undefined,
 ) {
@@ -281,11 +368,64 @@ function handleMove(
   const stash = manager.get(stashName);
   if (!stash) return errorResponse(`Stash not found: ${stashName}`);
 
+  // Move on filesystem - reconciler will detect rename
+  const fromPath = nodePath.join(stash.path, from);
+  const toPath = nodePath.join(stash.path, to);
   try {
-    stash.move(from, to);
-    // stash.move triggers background save + debounced sync
+    await fs.mkdir(nodePath.dirname(toPath), { recursive: true });
+    await fs.rename(fromPath, toPath);
     return jsonResponse({ success: true });
   } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+      return errorResponse(`File not found: ${from}`);
+    }
     return errorResponse((err as Error).message);
   }
+}
+
+async function handleGrep(
+  manager: StashManager,
+  args: Record<string, unknown> | undefined,
+) {
+  const stashName = args?.stash as string;
+  const pattern = args?.pattern as string;
+  const globPattern = args?.glob as string | undefined;
+
+  if (!stashName || !pattern) {
+    return errorResponse("stash and pattern are required");
+  }
+
+  const stash = manager.get(stashName);
+  if (!stash) return errorResponse(`Stash not found: ${stashName}`);
+
+  let filePaths: string[];
+  if (globPattern) {
+    filePaths = stash.glob(globPattern);
+  } else {
+    filePaths = stash.glob("**/*");
+  }
+
+  const regex = new RegExp(pattern);
+  const matches: Array<{ path: string; line: number; content: string }> = [];
+
+  for (const filePath of filePaths) {
+    const diskPath = nodePath.join(stash.path, filePath);
+    try {
+      const content = await fs.readFile(diskPath, "utf-8");
+      const lines = content.split("\n");
+      for (let i = 0; i < lines.length; i++) {
+        if (regex.test(lines[i])) {
+          matches.push({
+            path: filePath,
+            line: i + 1,
+            content: lines[i],
+          });
+        }
+      }
+    } catch {
+      // Skip files that can't be read (binary, etc.)
+    }
+  }
+
+  return jsonResponse({ matches });
 }

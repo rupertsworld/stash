@@ -3,7 +3,15 @@ import { getGitHubToken } from "../../core/config.js";
 import { GitHubProvider } from "../../providers/github.js";
 import { promptChoice, prompt } from "../prompts.js";
 
-export async function createStash(name: string): Promise<void> {
+interface CreateOptions {
+  path?: string;
+  description?: string;
+}
+
+export async function createStash(
+  name: string,
+  opts: CreateOptions,
+): Promise<void> {
   const manager = await StashManager.load();
 
   const providerChoice = await promptChoice("Sync provider?", [
@@ -12,8 +20,7 @@ export async function createStash(name: string): Promise<void> {
   ]);
 
   let provider = null;
-  let providerType: string | null = null;
-  let key: string | null = null;
+  let remote: string | null = null;
 
   if (providerChoice === "GitHub") {
     const token = await getGitHubToken();
@@ -33,7 +40,6 @@ export async function createStash(name: string): Promise<void> {
     const [owner, repo] = repoName.split("/");
     provider = new GitHubProvider(token, owner, repo);
 
-    // Create remote if it doesn't exist
     const remoteExists = await provider.exists();
     if (!remoteExists) {
       console.log(`Creating ${repoName}...`);
@@ -45,14 +51,19 @@ export async function createStash(name: string): Promise<void> {
       }
     }
 
-    providerType = "github";
-    key = `github:${repoName}`;
+    remote = `github:${repoName}`;
   }
 
   try {
-    const stash = await manager.create(name, provider, providerType, key);
+    const stash = await manager.create(
+      name,
+      opts.path,
+      provider,
+      remote,
+      opts.description,
+    );
     console.log(`Stash "${name}" created.`);
-    if (key) console.log(`Key: ${key}`);
+    if (remote) console.log(`Remote: ${remote}`);
   } catch (err) {
     console.error((err as Error).message);
     process.exit(1);

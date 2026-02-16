@@ -28,7 +28,6 @@ describe("MCP Server", () => {
 
   afterEach(async () => {
     await client.close();
-    // Wait a bit for any background saves to complete
     await new Promise((r) => setTimeout(r, 50));
     await fs.rm(tmpDir, { recursive: true, force: true });
   });
@@ -40,17 +39,23 @@ describe("MCP Server", () => {
     expect(toolNames).toContain("stash_glob");
     expect(toolNames).toContain("stash_read");
     expect(toolNames).toContain("stash_write");
+    expect(toolNames).toContain("stash_edit");
     expect(toolNames).toContain("stash_delete");
     expect(toolNames).toContain("stash_move");
+    expect(toolNames).toContain("stash_grep");
   });
 
   it("stash_list: should list stashes (no args)", async () => {
     await manager.create("alpha");
     await manager.create("beta");
 
-    const result = await client.callTool({ name: "stash_list", arguments: {} });
+    const result = await client.callTool({
+      name: "stash_list",
+      arguments: {},
+    });
     const data = JSON.parse((result.content as any)[0].text);
-    expect(data.items).toEqual(["alpha", "beta"]);
+    expect(data.stashes).toHaveLength(2);
+    expect(data.stashes.map((s: any) => s.name)).toEqual(["alpha", "beta"]);
   });
 
   it("stash_list: should list files in stash root", async () => {
@@ -92,7 +97,7 @@ describe("MCP Server", () => {
 
     const result = await client.callTool({
       name: "stash_glob",
-      arguments: { stash: "test", pattern: "**/*.md" },
+      arguments: { stash: "test", glob: "**/*.md" },
     });
     const data = JSON.parse((result.content as any)[0].text);
     expect(data.files).toEqual(["docs/guide.md", "readme.md"]);
@@ -101,14 +106,18 @@ describe("MCP Server", () => {
   it("stash_glob: should error on missing stash", async () => {
     const result = await client.callTool({
       name: "stash_glob",
-      arguments: { stash: "nonexistent", pattern: "**" },
+      arguments: { stash: "nonexistent", glob: "**" },
     });
     const data = JSON.parse((result.content as any)[0].text);
     expect(data.error).toContain("Stash not found");
   });
 
-  it("stash_read: should read file content", async () => {
+  it("stash_read: should read file from disk", async () => {
     const stash = await manager.create("test");
+    // Write file to disk directly
+    await fs.mkdir(stash.path, { recursive: true });
+    await fs.writeFile(path.join(stash.path, "hello.md"), "Hello, world!");
+    // Also register in stash structure so glob/list works
     stash.write("hello.md", "Hello, world!");
     await stash.flush();
 
@@ -140,8 +149,8 @@ describe("MCP Server", () => {
     expect(data.error).toContain("Stash not found");
   });
 
-  it("stash_write: should write content", async () => {
-    await manager.create("test");
+  it("stash_write: should write content to disk", async () => {
+    const stash = await manager.create("test");
 
     const result = await client.callTool({
       name: "stash_write",
@@ -150,34 +159,15 @@ describe("MCP Server", () => {
     const data = JSON.parse((result.content as any)[0].text);
     expect(data.success).toBe(true);
 
-    // Re-fetch stash after MCP operation (reload may have replaced it)
-    const stash = manager.get("test")!;
-    expect(stash.read("hello.md")).toBe("Hello!");
-    await stash.flush();
+    // Verify file was written to disk
+    const content = await fs.readFile(
+      path.join(stash.path, "hello.md"),
+      "utf-8",
+    );
+    expect(content).toBe("Hello!");
   });
 
-  it("stash_write: should apply patch", async () => {
-    const stash = await manager.create("test");
-    stash.write("file.md", "Hello world");
-    await stash.flush();
-
-    const result = await client.callTool({
-      name: "stash_write",
-      arguments: {
-        stash: "test",
-        path: "file.md",
-        patch: { start: 5, end: 5, text: "," },
-      },
-    });
-    const data = JSON.parse((result.content as any)[0].text);
-    expect(data.success).toBe(true);
-    // Re-fetch stash after MCP operation
-    const updatedStash = manager.get("test")!;
-    expect(updatedStash.read("file.md")).toBe("Hello, world");
-    await updatedStash.flush();
-  });
-
-  it("stash_write: should error without content or patch", async () => {
+  it("stash_write: should error without content", async () => {
     await manager.create("test");
 
     const result = await client.callTool({
@@ -185,11 +175,85 @@ describe("MCP Server", () => {
       arguments: { stash: "test", path: "file.md" },
     });
     const data = JSON.parse((result.content as any)[0].text);
-    expect(data.error).toContain("Must provide content or patch");
+    expect(data.error).toContain("content is required");
   });
 
-  it("stash_delete: should delete file", async () => {
+  it("stash_edit: should replace text in file", async () => {
     const stash = await manager.create("test");
+    await fs.writeFile(
+      path.join(stash.path, "file.md"),
+      "Hello world",
+    );
+    stash.write("file.md", "Hello world");
+    await stash.flush();
+
+    const result = await client.callTool({
+      name: "stash_edit",
+      arguments: {
+        stash: "test",
+        path: "file.md",
+        old_string: "world",
+        new_string: "universe",
+      },
+    });
+    const data = JSON.parse((result.content as any)[0].text);
+    expect(data.success).toBe(true);
+
+    const content = await fs.readFile(
+      path.join(stash.path, "file.md"),
+      "utf-8",
+    );
+    expect(content).toBe("Hello universe");
+  });
+
+  it("stash_edit: should error when old_string not found", async () => {
+    const stash = await manager.create("test");
+    await fs.writeFile(
+      path.join(stash.path, "file.md"),
+      "Hello world",
+    );
+    stash.write("file.md", "Hello world");
+    await stash.flush();
+
+    const result = await client.callTool({
+      name: "stash_edit",
+      arguments: {
+        stash: "test",
+        path: "file.md",
+        old_string: "nonexistent",
+        new_string: "replacement",
+      },
+    });
+    const data = JSON.parse((result.content as any)[0].text);
+    expect(data.error).toContain("old_string not found");
+  });
+
+  it("stash_edit: should error when old_string not unique", async () => {
+    const stash = await manager.create("test");
+    await fs.writeFile(
+      path.join(stash.path, "file.md"),
+      "aaa aaa",
+    );
+    stash.write("file.md", "aaa aaa");
+    await stash.flush();
+
+    const result = await client.callTool({
+      name: "stash_edit",
+      arguments: {
+        stash: "test",
+        path: "file.md",
+        old_string: "aaa",
+        new_string: "bbb",
+      },
+    });
+    const data = JSON.parse((result.content as any)[0].text);
+    expect(data.error).toContain("not unique");
+  });
+
+  it("stash_delete: should delete file from disk", async () => {
+    const stash = await manager.create("test");
+    const filePath = path.join(stash.path, "file.md");
+    await fs.writeFile(filePath, "content");
     stash.write("file.md", "content");
     await stash.flush();
 
@@ -199,10 +263,8 @@ describe("MCP Server", () => {
     });
     const data = JSON.parse((result.content as any)[0].text);
     expect(data.success).toBe(true);
-    // Re-fetch stash after MCP operation
-    const updatedStash = manager.get("test")!;
-    expect(() => updatedStash.read("file.md")).toThrow();
-    await updatedStash.flush();
+
+    await expect(fs.access(filePath)).rejects.toThrow();
   });
 
   it("stash_delete: should error on missing file", async () => {
@@ -216,8 +278,9 @@ describe("MCP Server", () => {
     expect(data.error).toContain("File not found");
   });
 
-  it("stash_move: should move file", async () => {
+  it("stash_move: should move file on disk", async () => {
     const stash = await manager.create("test");
+    await fs.writeFile(path.join(stash.path, "old.md"), "content");
     stash.write("old.md", "content");
     await stash.flush();
 
@@ -227,11 +290,15 @@ describe("MCP Server", () => {
     });
     const data = JSON.parse((result.content as any)[0].text);
     expect(data.success).toBe(true);
-    // Re-fetch stash after MCP operation
-    const updatedStash = manager.get("test")!;
-    expect(updatedStash.read("new.md")).toBe("content");
-    expect(() => updatedStash.read("old.md")).toThrow();
-    await updatedStash.flush();
+
+    const content = await fs.readFile(
+      path.join(stash.path, "new.md"),
+      "utf-8",
+    );
+    expect(content).toBe("content");
+    await expect(
+      fs.access(path.join(stash.path, "old.md")),
+    ).rejects.toThrow();
   });
 
   it("stash_move: should error on missing source", async () => {
@@ -243,5 +310,47 @@ describe("MCP Server", () => {
     });
     const data = JSON.parse((result.content as any)[0].text);
     expect(data.error).toContain("File not found");
+  });
+
+  it("stash_grep: should find matches in files", async () => {
+    const stash = await manager.create("test");
+    stash.write("a.md", "Hello world");
+    stash.write("b.md", "Hello universe");
+    stash.write("c.ts", "const x = 42");
+    await stash.flush();
+
+    // Write files to disk too
+    await fs.writeFile(path.join(stash.path, "a.md"), "Hello world");
+    await fs.writeFile(path.join(stash.path, "b.md"), "Hello universe");
+    await fs.writeFile(path.join(stash.path, "c.ts"), "const x = 42");
+
+    const result = await client.callTool({
+      name: "stash_grep",
+      arguments: { stash: "test", pattern: "Hello" },
+    });
+    const data = JSON.parse((result.content as any)[0].text);
+    expect(data.matches).toHaveLength(2);
+    expect(data.matches.map((m: any) => m.path).sort()).toEqual([
+      "a.md",
+      "b.md",
+    ]);
+  });
+
+  it("stash_grep: should filter by glob", async () => {
+    const stash = await manager.create("test");
+    stash.write("a.md", "Hello world");
+    stash.write("b.ts", "Hello universe");
+    await stash.flush();
+
+    await fs.writeFile(path.join(stash.path, "a.md"), "Hello world");
+    await fs.writeFile(path.join(stash.path, "b.ts"), "Hello universe");
+
+    const result = await client.callTool({
+      name: "stash_grep",
+      arguments: { stash: "test", pattern: "Hello", glob: "**/*.md" },
+    });
+    const data = JSON.parse((result.content as any)[0].text);
+    expect(data.matches).toHaveLength(1);
+    expect(data.matches[0].path).toBe("a.md");
   });
 });

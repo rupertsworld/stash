@@ -36,6 +36,13 @@ describe("StashManager", () => {
     expect(manager.list()).toEqual(["my-project"]);
   });
 
+  it("should register stash in global config", async () => {
+    const manager = await StashManager.load(tmpDir);
+    await manager.create("my-project");
+    const cfg = await config.readConfig(tmpDir);
+    expect(cfg.stashes["my-project"]).toBeTruthy();
+  });
+
   it("should throw when creating duplicate stash", async () => {
     const manager = await StashManager.load(tmpDir);
     await manager.create("test");
@@ -66,6 +73,9 @@ describe("StashManager", () => {
     await manager.delete("test");
     expect(manager.list()).toEqual([]);
     expect(manager.get("test")).toBeUndefined();
+    // Should also be removed from global config
+    const cfg = await config.readConfig(tmpDir);
+    expect(cfg.stashes["test"]).toBeUndefined();
   });
 
   it("should throw when deleting non-existent stash", async () => {
@@ -74,7 +84,6 @@ describe("StashManager", () => {
   });
 
   it("should load stashes from disk", async () => {
-    // Create and save stashes
     const manager1 = await StashManager.load(tmpDir);
     const stash = await manager1.create("project-a");
     stash.write("readme.md", "Hello");
@@ -101,10 +110,20 @@ describe("StashManager", () => {
     };
 
     const manager = await StashManager.load(tmpDir);
-    const s1 = await manager.create("a", mockProvider, "mock", "mock:a");
+    const s1 = await manager.create(
+      "a",
+      undefined,
+      mockProvider,
+      "mock:a",
+    );
     s1.write("file.md", "content");
     await s1.flush();
-    const s2 = await manager.create("b", mockProvider, "mock", "mock:b");
+    const s2 = await manager.create(
+      "b",
+      undefined,
+      mockProvider,
+      "mock:b",
+    );
     s2.write("file.md", "content");
     await s2.flush();
 
@@ -113,10 +132,8 @@ describe("StashManager", () => {
   });
 
   it("should restore github provider when loading stash with token", async () => {
-    // Mock getGitHubToken to return a token
     vi.spyOn(config, "getGitHubToken").mockResolvedValue("ghp_test123");
 
-    // Create a stash with github provider type
     const manager1 = await StashManager.load(tmpDir);
     const mockProvider: SyncProvider = {
       async sync(docs) {
@@ -129,22 +146,33 @@ describe("StashManager", () => {
     };
     const stash = await manager1.create(
       "test",
+      undefined,
       mockProvider,
-      "github",
       "github:owner/repo",
     );
     stash.write("file.md", "content");
     await stash.flush();
 
-    // Load fresh - should restore provider
+    // Load fresh - should restore provider from meta.remote
     const manager2 = await StashManager.load(tmpDir);
     const loaded = manager2.get("test")!;
 
-    // Verify the stash can sync (provider was restored)
-    // We can't easily verify the provider instance, but we can check meta
-    expect(loaded.getMeta().provider).toBe("github");
-    expect(loaded.getMeta().key).toBe("github:owner/repo");
+    const meta = loaded.getMeta();
+    expect(meta.name).toBe("test");
+    expect(meta.remote).toBe("github:owner/repo");
 
     vi.restoreAllMocks();
+  });
+
+  it("should create stash at custom path", async () => {
+    const manager = await StashManager.load(tmpDir);
+    const customPath = path.join(tmpDir, "custom-location");
+    const stash = await manager.create("my-stash", customPath);
+    expect(stash.path).toBe(customPath);
+    expect(stash.name).toBe("my-stash");
+
+    // Verify it's registered in config
+    const cfg = await config.readConfig(tmpDir);
+    expect(cfg.stashes["my-stash"]).toBe(customPath);
   });
 });

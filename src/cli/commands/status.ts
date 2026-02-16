@@ -2,7 +2,6 @@ import { StashManager } from "../../core/manager.js";
 import { PORT } from "../../daemon.js";
 
 export async function showStatus(): Promise<void> {
-  // Check daemon
   let daemonRunning = false;
   try {
     const res = await fetch(`http://localhost:${PORT}/health`);
@@ -28,7 +27,7 @@ export async function showStatus(): Promise<void> {
     const stash = manager.get(name)!;
     const meta = stash.getMeta();
     const files = stash.glob("**/*");
-    const suffix = meta.key ? ` → ${meta.key}` : " (local)";
-    console.log(`  ${name}${suffix} (${files.length} files)`);
+    const remote = meta.remote ? `→ ${meta.remote}` : "(local)";
+    console.log(`  ${name}  ${remote}  (${files.length} files)  ${stash.path}`);
   }
 }

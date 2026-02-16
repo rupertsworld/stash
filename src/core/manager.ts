@@ -1,88 +1,125 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { Stash, type StashMeta } from "./stash.js";
-import { DEFAULT_STASH_DIR, getGitHubToken } from "./config.js";
+import {
+  DEFAULT_STASH_DIR,
+  ensureConfig,
+  getGitHubToken,
+  registerStash,
+  unregisterStash,
+  type GlobalConfig,
+} from "./config.js";
 import type { SyncProvider } from "../providers/types.js";
 import { GitHubProvider } from "../providers/github.js";
 
 export class StashManager {
   private stashes: Map<string, Stash>;
+  private config: GlobalConfig;
   private baseDir: string;
 
-  constructor(stashes: Map<string, Stash>, baseDir: string) {
+  constructor(
+    stashes: Map<string, Stash>,
+    config: GlobalConfig,
+    baseDir: string,
+  ) {
     this.stashes = stashes;
+    this.config = config;
     this.baseDir = baseDir;
   }
 
   static async load(
     baseDir: string = DEFAULT_STASH_DIR,
   ): Promise<StashManager> {
+    const config = await ensureConfig(baseDir);
     const stashes = new Map<string, Stash>();
 
-    try {
-      const entries = await fs.readdir(baseDir, { withFileTypes: true });
-      for (const entry of entries) {
-        if (!entry.isDirectory()) continue;
-        // Check if it's a stash directory (has meta.json)
-        const metaPath = path.join(baseDir, entry.name, "meta.json");
+    for (const [name, stashPath] of Object.entries(config.stashes)) {
+      try {
+        // Determine provider from meta
+        let provider: SyncProvider | null = null;
         try {
-          await fs.access(metaPath);
-
-          // Read meta to determine provider
-          const metaData = await fs.readFile(metaPath, "utf-8");
+          const metaData = await fs.readFile(
+            path.join(stashPath, ".stash", "meta.json"),
+            "utf-8",
+          );
           const meta: StashMeta = JSON.parse(metaData);
 
-          // Recreate provider from meta
-          let provider: SyncProvider | null = null;
-          if (meta.provider === "github" && meta.key) {
-            const token = await getGitHubToken(baseDir);
-            if (token) {
-              const [, repoPath] = meta.key.split(":");
-              const [owner, repo] = repoPath.split("/");
-              provider = new GitHubProvider(token, owner, repo);
+          if (meta.remote) {
+            const [providerType, ...rest] = meta.remote.split(":");
+            const repoPath = rest.join(":");
+            if (providerType === "github" && repoPath) {
+              const token = await getGitHubToken(baseDir);
+              if (token) {
+                const [owner, repo] = repoPath.split("/");
+                provider = new GitHubProvider(token, owner, repo);
+              }
             }
           }
-
-          const stash = await Stash.load(entry.name, baseDir, provider);
-          stashes.set(entry.name, stash);
         } catch {
-          // Not a stash directory, skip
+          // Meta might not exist yet
         }
+
+        const stash = await Stash.load(name, stashPath, config.actorId, provider);
+        stashes.set(name, stash);
+      } catch (err) {
+        console.warn(`Failed to load stash ${name}: ${(err as Error).message}`);
       }
-    } catch {
-      // Base dir doesn't exist yet
     }
 
-    return new StashManager(stashes, baseDir);
+    return new StashManager(stashes, config, baseDir);
   }
 
   get(name: string): Stash | undefined {
     return this.stashes.get(name);
   }
 
-  /**
-   * Reload stashes from disk. Picks up new stashes created externally.
-   */
   async reload(): Promise<void> {
     const fresh = await StashManager.load(this.baseDir);
     this.stashes = fresh.stashes;
+    this.config = fresh.config;
   }
 
   list(): string[] {
     return [...this.stashes.keys()].sort();
   }
 
+  getStashes(): Map<string, Stash> {
+    return this.stashes;
+  }
+
+  getConfig(): GlobalConfig {
+    return this.config;
+  }
+
   async create(
     name: string,
+    stashPath?: string,
     provider: SyncProvider | null = null,
-    providerType: string | null = null,
-    key: string | null = null,
+    remote: string | null = null,
+    description?: string,
   ): Promise<Stash> {
     if (this.stashes.has(name)) {
       throw new Error(`Stash already exists: ${name}`);
     }
-    const stash = Stash.create(name, this.baseDir, provider, providerType, key);
+
+    const resolvedPath = stashPath
+      ? path.resolve(stashPath)
+      : path.join(this.baseDir, name);
+
+    const stash = Stash.create(
+      name,
+      resolvedPath,
+      this.config.actorId,
+      provider,
+      remote,
+      description,
+    );
     await stash.save();
+
+    // Register in global config
+    await registerStash(name, resolvedPath, this.baseDir);
+    this.config.stashes[name] = resolvedPath;
+
     this.stashes.set(name, stash);
     return stash;
   }
@@ -91,25 +128,32 @@ export class StashManager {
     key: string,
     localName: string,
     provider: SyncProvider,
+    stashPath?: string,
+    description?: string,
   ): Promise<Stash> {
     if (this.stashes.has(localName)) {
       throw new Error(`Stash already exists: ${localName}`);
     }
 
-    // Determine provider type from key
-    const providerType = key.split(":")[0];
+    const resolvedPath = stashPath
+      ? path.resolve(stashPath)
+      : path.join(this.baseDir, localName);
 
-    // Create empty stash with provider
     const stash = Stash.create(
       localName,
-      this.baseDir,
+      resolvedPath,
+      this.config.actorId,
       provider,
-      providerType,
       key,
+      description,
     );
 
     // Sync to pull remote content
     await stash.sync();
+
+    // Register in global config
+    await registerStash(localName, resolvedPath, this.baseDir);
+    this.config.stashes[localName] = resolvedPath;
 
     this.stashes.set(localName, stash);
     return stash;
@@ -119,7 +163,6 @@ export class StashManager {
     const stash = this.stashes.get(name);
     if (!stash) throw new Error(`Stash not found: ${name}`);
 
-    // Delete remote if requested
     if (deleteRemote) {
       const provider = stash.getProvider();
       if (provider) {
@@ -128,8 +171,11 @@ export class StashManager {
     }
 
     // Remove from disk
-    const stashDir = path.join(this.baseDir, name);
-    await fs.rm(stashDir, { recursive: true, force: true });
+    await fs.rm(stash.path, { recursive: true, force: true });
+
+    // Unregister from global config
+    await unregisterStash(name, this.baseDir);
+    delete this.config.stashes[name];
 
     this.stashes.delete(name);
   }

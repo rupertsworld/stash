@@ -12,7 +12,12 @@ export async function listStashes(): Promise<void> {
   for (const name of stashes) {
     const stash = manager.get(name)!;
     const meta = stash.getMeta();
-    const suffix = meta.key ? ` (${meta.key})` : " (local)";
-    console.log(`  ${name}${suffix}`);
+    const desc = meta.description ? `"${meta.description}"` : "";
+    const remote = meta.remote ? meta.remote : "(local only)";
+    const parts = [name];
+    if (desc) parts.push(desc);
+    parts.push(stash.path);
+    parts.push(remote);
+    console.log(`  ${parts.join("  ")}`);
   }
 }

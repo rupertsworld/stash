@@ -5,19 +5,38 @@ import { authGitHub } from "./cli/commands/auth.js";
 import { createStash } from "./cli/commands/create.js";
 import { connectStash } from "./cli/commands/connect.js";
 import { listStashes } from "./cli/commands/list.js";
+import { editStash } from "./cli/commands/edit.js";
 import { deleteStash } from "./cli/commands/delete.js";
+import { linkStash } from "./cli/commands/link.js";
+import { unlinkStash } from "./cli/commands/unlink.js";
 import { syncStashes } from "./cli/commands/sync.js";
 import { showStatus } from "./cli/commands/status.js";
 import { startDaemon } from "./cli/commands/start.js";
 import { stopDaemon } from "./cli/commands/stop.js";
 import { install } from "./cli/commands/install.js";
+import {
+  pathOption,
+  descriptionOption,
+  forceOption,
+} from "./cli/options.js";
 
 const program = new Command();
 
 program
   .name("stash")
-  .description("A local-first collaborative folder service with MCP interface")
-  .version("1.0.0");
+  .description(
+    "A local-first collaborative folder service with MCP interface",
+  )
+  .version("1.0.0")
+  .action(async () => {
+    // Bare `stash` command: start daemon + create symlinks from .stash.json
+    await startDaemon();
+    try {
+      await linkStash();
+    } catch {
+      // .stash.json might not exist, that's fine
+    }
+  });
 
 // Auth
 const auth = program.command("auth").description("Authentication commands");
@@ -30,13 +49,16 @@ auth
 program
   .command("create <name>")
   .description("Create a new stash")
-  .action(createStash);
+  .addOption(pathOption)
+  .addOption(descriptionOption)
+  .action((name, opts) => createStash(name, opts));
 
 program
-  .command("connect <key>")
+  .command("connect <remote>")
   .description("Connect to an existing remote stash")
   .requiredOption("--name <name>", "Local name for the stash")
-  .action((key, opts) => connectStash(key, opts.name));
+  .addOption(pathOption)
+  .action((remote, opts) => connectStash(remote, opts));
 
 program
   .command("list")
@@ -44,9 +66,28 @@ program
   .action(listStashes);
 
 program
+  .command("edit <name>")
+  .description("Update stash metadata")
+  .addOption(descriptionOption)
+  .option("--remote <remote>", "change remote (use 'none' to disconnect)")
+  .action((name, opts) => editStash(name, opts));
+
+program
   .command("delete <name>")
   .description("Delete a stash")
-  .action(deleteStash);
+  .option("--remote", "also delete from remote provider")
+  .addOption(forceOption)
+  .action((name, opts) => deleteStash(name, opts));
+
+program
+  .command("link [stash] [path]")
+  .description("Create symlink to a stash")
+  .action((stash, linkPath) => linkStash(stash, linkPath));
+
+program
+  .command("unlink [path]")
+  .description("Remove stash symlink")
+  .action((linkPath) => unlinkStash(linkPath));
 
 program
   .command("sync [name]")

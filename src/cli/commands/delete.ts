@@ -1,7 +1,15 @@
 import { StashManager } from "../../core/manager.js";
 import { confirm } from "../prompts.js";
 
-export async function deleteStash(name: string): Promise<void> {
+interface DeleteOptions {
+  remote?: boolean;
+  force?: boolean;
+}
+
+export async function deleteStash(
+  name: string,
+  opts: DeleteOptions,
+): Promise<void> {
   const manager = await StashManager.load();
   const stash = manager.get(name);
 
@@ -10,11 +18,25 @@ export async function deleteStash(name: string): Promise<void> {
     process.exit(1);
   }
 
-  const meta = stash.getMeta();
-  let deleteRemote = false;
+  // Confirm unless --force
+  if (!opts.force) {
+    const confirmed = await confirm(`Delete stash "${name}"?`);
+    if (!confirmed) {
+      console.log("Cancelled.");
+      return;
+    }
+  }
 
-  if (meta.key) {
-    deleteRemote = await confirm("Also delete remote?");
+  let deleteRemote = opts.remote ?? false;
+
+  // Extra confirmation for remote deletion
+  if (deleteRemote && !opts.force) {
+    const confirmed = await confirm(
+      "This will permanently delete the remote. Are you sure?",
+    );
+    if (!confirmed) {
+      deleteRemote = false;
+    }
   }
 
   try {

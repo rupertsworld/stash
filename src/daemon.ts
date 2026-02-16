@@ -1,23 +1,36 @@
 /**
  * Background daemon for syncing and MCP server.
- * Watches for local changes and syncs automatically.
+ * Uses StashReconciler for file watching and automatic sync.
  */
 
-import * as fs from "node:fs";
-import * as path from "node:path";
 import express from "express";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { createMcpServer } from "./mcp.js";
 import { StashManager } from "./core/manager.js";
+import { StashReconciler } from "./core/reconciler.js";
 import { DEFAULT_STASH_DIR } from "./core/config.js";
+import type { Stash } from "./core/stash.js";
 
 export const PORT = 32847;
 const SYNC_INTERVAL_MS = 30_000;
-const WATCH_DEBOUNCE_MS = 500;
 
-export async function startDaemon(baseDir: string = DEFAULT_STASH_DIR): Promise<void> {
+export async function startDaemon(
+  baseDir: string = DEFAULT_STASH_DIR,
+): Promise<void> {
   const manager = await StashManager.load(baseDir);
   const mcpServer = createMcpServer(manager);
+
+  const reconcilers = new Map<string, StashReconciler>();
+
+  // Start reconcilers for all stashes
+  for (const name of manager.list()) {
+    const stash = manager.get(name);
+    if (stash) {
+      const reconciler = new StashReconciler(stash);
+      await reconciler.start();
+      reconcilers.set(name, reconciler);
+    }
+  }
 
   const app = express();
   app.use(express.json());
@@ -41,59 +54,34 @@ export async function startDaemon(baseDir: string = DEFAULT_STASH_DIR): Promise<
     console.log(`Stash daemon listening on http://localhost:${PORT}`);
   });
 
-  // Watch for file changes
-  setupFileWatcher(baseDir, manager);
-
   // Periodic sync as fallback
   setInterval(async () => {
     try {
       await manager.sync();
+      // Flush reconcilers after sync to write remote changes to disk
+      for (const [name, reconciler] of reconcilers) {
+        try {
+          await reconciler.flush();
+        } catch (err) {
+          console.error(
+            `Flush error (${name}):`,
+            (err as Error).message,
+          );
+        }
+      }
     } catch (err) {
       console.error("Sync error:", (err as Error).message);
     }
   }, SYNC_INTERVAL_MS);
-}
 
-function setupFileWatcher(baseDir: string, manager: StashManager): void {
-  const pendingSyncs = new Map<string, ReturnType<typeof setTimeout>>();
-
-  // Watch the base directory for stash changes
-  try {
-    fs.watch(baseDir, { recursive: true }, (event, filename) => {
-      if (!filename || !filename.endsWith(".automerge")) return;
-
-      // Extract stash name from path (first directory component)
-      const stashName = filename.split(path.sep)[0];
-      if (!stashName) return;
-
-      const stash = manager.get(stashName);
-      if (!stash) return;
-
-      // Skip if already syncing
-      if (stash.isSyncing()) return;
-
-      // Debounce syncs per stash
-      const existingTimeout = pendingSyncs.get(stashName);
-      if (existingTimeout) {
-        clearTimeout(existingTimeout);
-      }
-
-      pendingSyncs.set(
-        stashName,
-        setTimeout(async () => {
-          pendingSyncs.delete(stashName);
-          try {
-            await stash.sync();
-          } catch (err) {
-            console.error(`Watch sync error (${stashName}):`, (err as Error).message);
-          }
-        }, WATCH_DEBOUNCE_MS)
-      );
-    });
-    console.log(`Watching ${baseDir} for changes`);
-  } catch (err) {
-    console.warn(`Could not watch ${baseDir}:`, (err as Error).message);
-  }
+  // Graceful shutdown
+  process.on("SIGTERM", async () => {
+    for (const reconciler of reconcilers.values()) {
+      await reconciler.close();
+    }
+    reconcilers.clear();
+    process.exit(0);
+  });
 }
 
 // Run as main
