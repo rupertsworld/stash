@@ -103,8 +103,12 @@ export function createMcpServer(manager: StashManager): Server {
           properties: {
             stash: { type: "string", description: "Stash name" },
             path: { type: "string", description: "File path within stash" },
+            glob: {
+              type: "string",
+              description: "Glob pattern to delete multiple files (mutually exclusive with path)",
+            },
           },
-          required: ["stash", "path"],
+          required: ["stash"],
         },
       },
       {
@@ -334,26 +338,61 @@ async function handleDelete(
   args: Record<string, unknown> | undefined,
 ) {
   const stashName = args?.stash as string;
-  const filePath = args?.path as string;
+  const filePath = args?.path as string | undefined;
+  const globPattern = args?.glob as string | undefined;
 
-  if (!stashName || !filePath) {
-    return errorResponse("stash and path are required");
+  if (!stashName) {
+    return errorResponse("stash is required");
+  }
+
+  if (filePath && globPattern) {
+    return errorResponse("path and glob are mutually exclusive");
+  }
+
+  if (!filePath && !globPattern) {
+    return errorResponse("either path or glob is required");
   }
 
   const stash = manager.get(stashName);
   if (!stash) return errorResponse(`Stash not found: ${stashName}`);
 
-  // Delete from filesystem - reconciler will pick up the change
-  const diskPath = nodePath.join(stash.path, filePath);
-  try {
-    await fs.unlink(diskPath);
-    return jsonResponse({ success: true });
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
-      return errorResponse(`File not found: ${filePath}`);
+  // Single file delete
+  if (filePath) {
+    const diskPath = nodePath.join(stash.path, filePath);
+    try {
+      await fs.unlink(diskPath);
+      return jsonResponse({ success: true });
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+        return errorResponse(`File not found: ${filePath}`);
+      }
+      return errorResponse((err as Error).message);
     }
-    return errorResponse((err as Error).message);
   }
+
+  // Glob delete
+  const files = await globFilesystem(stash.path, globPattern!);
+  if (files.length === 0) {
+    return jsonResponse({ success: true, deleted: [] });
+  }
+
+  const deleted: string[] = [];
+  const errors: string[] = [];
+
+  for (const file of files) {
+    const diskPath = nodePath.join(stash.path, file);
+    try {
+      await fs.unlink(diskPath);
+      deleted.push(file);
+    } catch (err) {
+      errors.push(`${file}: ${(err as Error).message}`);
+    }
+  }
+
+  if (errors.length > 0) {
+    return jsonResponse({ success: false, deleted, errors });
+  }
+  return jsonResponse({ success: true, deleted });
 }
 
 async function handleMove(

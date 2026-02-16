@@ -282,6 +282,64 @@ describe("MCP Server", () => {
     expect(data.error).toContain("File not found");
   });
 
+  it("stash_delete: should delete multiple files with glob", async () => {
+    const stash = await manager.create("test");
+    await fs.mkdir(path.join(stash.path, "docs"), { recursive: true });
+    await fs.writeFile(path.join(stash.path, "docs/a.md"), "a");
+    await fs.writeFile(path.join(stash.path, "docs/b.md"), "b");
+    await fs.writeFile(path.join(stash.path, "keep.ts"), "keep");
+
+    const result = await client.callTool({
+      name: "stash_delete",
+      arguments: { stash: "test", glob: "docs/**" },
+    });
+    const data = JSON.parse((result.content as any)[0].text);
+    expect(data.success).toBe(true);
+    expect(data.deleted).toContain("docs/a.md");
+    expect(data.deleted).toContain("docs/b.md");
+    expect(data.deleted).toHaveLength(2);
+
+    // Verify files are gone
+    await expect(fs.access(path.join(stash.path, "docs/a.md"))).rejects.toThrow();
+    await expect(fs.access(path.join(stash.path, "docs/b.md"))).rejects.toThrow();
+    // keep.ts should still exist
+    await expect(fs.access(path.join(stash.path, "keep.ts"))).resolves.toBeUndefined();
+  });
+
+  it("stash_delete: should error when both path and glob provided", async () => {
+    await manager.create("test");
+
+    const result = await client.callTool({
+      name: "stash_delete",
+      arguments: { stash: "test", path: "file.md", glob: "**/*.md" },
+    });
+    const data = JSON.parse((result.content as any)[0].text);
+    expect(data.error).toContain("mutually exclusive");
+  });
+
+  it("stash_delete: should error when neither path nor glob provided", async () => {
+    await manager.create("test");
+
+    const result = await client.callTool({
+      name: "stash_delete",
+      arguments: { stash: "test" },
+    });
+    const data = JSON.parse((result.content as any)[0].text);
+    expect(data.error).toContain("either path or glob is required");
+  });
+
+  it("stash_delete: glob with no matches should succeed with empty deleted list", async () => {
+    await manager.create("test");
+
+    const result = await client.callTool({
+      name: "stash_delete",
+      arguments: { stash: "test", glob: "**/*.nonexistent" },
+    });
+    const data = JSON.parse((result.content as any)[0].text);
+    expect(data.success).toBe(true);
+    expect(data.deleted).toEqual([]);
+  });
+
   it("stash_move: should move file on disk", async () => {
     const stash = await manager.create("test");
     await fs.writeFile(path.join(stash.path, "old.md"), "content");

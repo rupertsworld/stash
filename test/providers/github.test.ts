@@ -17,6 +17,7 @@ vi.mock("octokit", () => {
         git: {
           getRef: vi.fn(),
           getCommit: vi.fn(),
+          getTree: vi.fn(),
           createTree: vi.fn(),
           createCommit: vi.fn(),
           updateRef: vi.fn(),
@@ -354,6 +355,212 @@ describe("GitHubProvider", () => {
       expect(deletedPaths).toContain("notes/.stash/structure.automerge");
       expect(deletedPaths).toContain("notes/.stash/docs/abc123.automerge");
     });
+  });
+});
+
+describe("listFiles", () => {
+  let provider: GitHubProvider;
+  let mockOctokit: any;
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    provider = new GitHubProvider("test-token", "owner", "repo");
+    const { Octokit } = await import("octokit");
+    mockOctokit = (Octokit as any).mock.results[
+      (Octokit as any).mock.results.length - 1
+    ].value;
+  });
+
+  it("should list all files excluding .stash/", async () => {
+    // Mock the tree API
+    mockOctokit.rest.git.getRef.mockResolvedValue({
+      data: { object: { sha: "head-sha" } },
+    });
+    mockOctokit.rest.git.getCommit.mockResolvedValue({
+      data: { tree: { sha: "tree-sha" } },
+    });
+    mockOctokit.rest.git.getTree.mockResolvedValue({
+      data: {
+        tree: [
+          { path: "readme.md", type: "blob" },
+          { path: "notes/hello.md", type: "blob" },
+          { path: "notes/world.md", type: "blob" },
+          { path: ".stash/structure.automerge", type: "blob" },
+          { path: ".stash/docs/abc.automerge", type: "blob" },
+          { path: ".gitignore", type: "blob" },
+        ],
+      },
+    });
+
+    const files = await provider.listFiles();
+
+    expect(files).toContain("readme.md");
+    expect(files).toContain("notes/hello.md");
+    expect(files).toContain("notes/world.md");
+    expect(files).toContain(".gitignore");
+    expect(files).not.toContain(".stash/structure.automerge");
+    expect(files).not.toContain(".stash/docs/abc.automerge");
+    expect(files).toHaveLength(4);
+  });
+
+  it("should return empty array for empty repo", async () => {
+    mockOctokit.rest.git.getRef.mockRejectedValue(
+      Object.assign(new Error("Not Found"), { status: 404 }),
+    );
+
+    const files = await provider.listFiles();
+
+    expect(files).toEqual([]);
+  });
+
+  it("should return empty array when repo has only .stash/ files", async () => {
+    mockOctokit.rest.git.getRef.mockResolvedValue({
+      data: { object: { sha: "head-sha" } },
+    });
+    mockOctokit.rest.git.getCommit.mockResolvedValue({
+      data: { tree: { sha: "tree-sha" } },
+    });
+    mockOctokit.rest.git.getTree.mockResolvedValue({
+      data: {
+        tree: [
+          { path: ".stash/structure.automerge", type: "blob" },
+          { path: ".stash/docs/abc.automerge", type: "blob" },
+        ],
+      },
+    });
+
+    const files = await provider.listFiles();
+
+    expect(files).toEqual([]);
+  });
+
+  it("should exclude directories (only return blobs)", async () => {
+    mockOctokit.rest.git.getRef.mockResolvedValue({
+      data: { object: { sha: "head-sha" } },
+    });
+    mockOctokit.rest.git.getCommit.mockResolvedValue({
+      data: { tree: { sha: "tree-sha" } },
+    });
+    mockOctokit.rest.git.getTree.mockResolvedValue({
+      data: {
+        tree: [
+          { path: "readme.md", type: "blob" },
+          { path: "notes", type: "tree" },
+          { path: "notes/hello.md", type: "blob" },
+        ],
+      },
+    });
+
+    const files = await provider.listFiles();
+
+    expect(files).toContain("readme.md");
+    expect(files).toContain("notes/hello.md");
+    expect(files).not.toContain("notes");
+    expect(files).toHaveLength(2);
+  });
+
+  it("should work with path prefix", async () => {
+    const prefixedProvider = new GitHubProvider("test-token", "owner", "repo", "subfolder");
+    const { Octokit } = await import("octokit");
+    const prefixMock = (Octokit as any).mock.results[
+      (Octokit as any).mock.results.length - 1
+    ].value;
+
+    prefixMock.rest.git.getRef.mockResolvedValue({
+      data: { object: { sha: "head-sha" } },
+    });
+    prefixMock.rest.git.getCommit.mockResolvedValue({
+      data: { tree: { sha: "tree-sha" } },
+    });
+    prefixMock.rest.git.getTree.mockResolvedValue({
+      data: {
+        tree: [
+          { path: "other/file.md", type: "blob" },
+          { path: "subfolder/readme.md", type: "blob" },
+          { path: "subfolder/notes/hello.md", type: "blob" },
+          { path: "subfolder/.stash/structure.automerge", type: "blob" },
+        ],
+      },
+    });
+
+    const files = await prefixedProvider.listFiles();
+
+    // Should only return files under prefix, with prefix stripped
+    expect(files).toContain("readme.md");
+    expect(files).toContain("notes/hello.md");
+    expect(files).not.toContain("subfolder/readme.md");
+    expect(files).not.toContain("other/file.md");
+    expect(files).not.toContain(".stash/structure.automerge");
+    expect(files).toHaveLength(2);
+  });
+});
+
+describe("fetchFile", () => {
+  let provider: GitHubProvider;
+  let mockOctokit: any;
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    provider = new GitHubProvider("test-token", "owner", "repo");
+    const { Octokit } = await import("octokit");
+    mockOctokit = (Octokit as any).mock.results[
+      (Octokit as any).mock.results.length - 1
+    ].value;
+  });
+
+  it("should fetch text file content", async () => {
+    const content = "Hello, world!";
+    mockOctokit.rest.repos.getContent.mockResolvedValue({
+      data: { content: Buffer.from(content).toString("base64") },
+    });
+
+    const result = await provider.fetchFile("readme.md");
+
+    expect(result.toString("utf-8")).toBe(content);
+    expect(mockOctokit.rest.repos.getContent).toHaveBeenCalledWith({
+      owner: "owner",
+      repo: "repo",
+      path: "readme.md",
+    });
+  });
+
+  it("should fetch binary file content", async () => {
+    const binaryContent = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a]);
+    mockOctokit.rest.repos.getContent.mockResolvedValue({
+      data: { content: binaryContent.toString("base64") },
+    });
+
+    const result = await provider.fetchFile("image.png");
+
+    expect(result).toEqual(binaryContent);
+  });
+
+  it("should apply path prefix", async () => {
+    const prefixedProvider = new GitHubProvider("test-token", "owner", "repo", "notes");
+    const { Octokit } = await import("octokit");
+    const prefixMock = (Octokit as any).mock.results[
+      (Octokit as any).mock.results.length - 1
+    ].value;
+
+    prefixMock.rest.repos.getContent.mockResolvedValue({
+      data: { content: Buffer.from("content").toString("base64") },
+    });
+
+    await prefixedProvider.fetchFile("hello.md");
+
+    expect(prefixMock.rest.repos.getContent).toHaveBeenCalledWith({
+      owner: "owner",
+      repo: "repo",
+      path: "notes/hello.md",
+    });
+  });
+
+  it("should throw on 404", async () => {
+    mockOctokit.rest.repos.getContent.mockRejectedValue(
+      Object.assign(new Error("Not Found"), { status: 404 }),
+    );
+
+    await expect(provider.fetchFile("nonexistent.md")).rejects.toThrow();
   });
 });
 

@@ -410,4 +410,81 @@ export class GitHubProvider implements SyncProvider {
     });
     return blob.sha;
   }
+
+  /**
+   * List all user files in the repo (excluding .stash/ and .git/).
+   * Uses the Git tree API for efficiency.
+   * Returns paths relative to the pathPrefix (if set).
+   */
+  async listFiles(): Promise<string[]> {
+    try {
+      // Get current commit
+      const { data: ref } = await this.octokit.rest.git.getRef({
+        owner: this.owner,
+        repo: this.repo,
+        ref: `heads/${this.branch}`,
+      });
+
+      const { data: commit } = await this.octokit.rest.git.getCommit({
+        owner: this.owner,
+        repo: this.repo,
+        commit_sha: ref.object.sha,
+      });
+
+      // Get full tree recursively
+      const { data: tree } = await this.octokit.rest.git.getTree({
+        owner: this.owner,
+        repo: this.repo,
+        tree_sha: commit.tree.sha,
+        recursive: "true",
+      });
+
+      const files: string[] = [];
+      for (const item of tree.tree) {
+        // Only include blobs (files), not trees (directories)
+        if (item.type !== "blob" || !item.path) continue;
+
+        let relativePath = item.path;
+
+        // If we have a path prefix, only include files under it
+        if (this.pathPrefix) {
+          if (!item.path.startsWith(this.pathPrefix + "/")) continue;
+          relativePath = item.path.slice(this.pathPrefix.length + 1);
+        }
+
+        // Exclude .stash/ and .git/ directories
+        if (relativePath.startsWith(".stash/")) continue;
+        if (relativePath.startsWith(".git/")) continue;
+
+        files.push(relativePath);
+      }
+
+      return files;
+    } catch (err) {
+      const error = err as Error & { status?: number };
+      if (error.status === 404) {
+        // Empty repo or branch doesn't exist
+        return [];
+      }
+      throw err;
+    }
+  }
+
+  /**
+   * Fetch a single file's content.
+   * Path should be relative to the pathPrefix (if set).
+   */
+  async fetchFile(filePath: string): Promise<Buffer> {
+    const { data } = await this.octokit.rest.repos.getContent({
+      owner: this.owner,
+      repo: this.repo,
+      path: this.prefixPath(filePath),
+    });
+
+    if ("content" in data && data.content) {
+      return Buffer.from(data.content, "base64");
+    }
+
+    throw new Error(`Could not fetch file: ${filePath}`);
+  }
 }
