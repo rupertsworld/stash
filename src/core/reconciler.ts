@@ -55,11 +55,14 @@ export class StashReconciler {
 
   async start(): Promise<void> {
     await this.initializeSnapshots();
+    const usePolling = process.env.NODE_ENV === "test" || process.env.STASH_USE_POLLING === "1";
 
     this.fsWatcher = chokidar.watch(this.stash.path, {
       ignored: [/\.stash[/\\]/, /[/\\]\./],
       ignoreInitial: true,
       followSymlinks: false,
+      usePolling,
+      interval: usePolling ? 100 : undefined,
       awaitWriteFinish: {
         stabilityThreshold: 200,
         pollInterval: 50,

@@ -78,6 +78,38 @@ describe("StashManager", () => {
     expect(cfg.stashes["test"]).toBeUndefined();
   });
 
+  it("should delete locally when provider has no delete()", async () => {
+    const manager = await StashManager.load(tmpDir);
+    const provider: SyncProvider = {
+      async fetch() {
+        return new Map();
+      },
+      async push() {},
+    };
+
+    await manager.create("local-only-delete", undefined, provider, "mock:remote");
+    await expect(manager.delete("local-only-delete", true)).resolves.toBeUndefined();
+    expect(manager.get("local-only-delete")).toBeUndefined();
+  });
+
+  it("should call provider.delete() before local deletion when available", async () => {
+    const deleteSpy = vi.fn().mockResolvedValue(undefined);
+    const manager = await StashManager.load(tmpDir);
+    const provider: SyncProvider = {
+      async fetch() {
+        return new Map();
+      },
+      async push() {},
+      delete: deleteSpy,
+    };
+
+    await manager.create("remote-delete", undefined, provider, "mock:remote");
+    await manager.delete("remote-delete", true);
+
+    expect(deleteSpy).toHaveBeenCalledOnce();
+    expect(manager.get("remote-delete")).toBeUndefined();
+  });
+
   it("should throw when deleting non-existent stash", async () => {
     const manager = await StashManager.load(tmpDir);
     await expect(manager.delete("nope")).rejects.toThrow("Stash not found");
@@ -103,7 +135,7 @@ describe("StashManager", () => {
         syncCalls.push("synced");
         return new Map();
       },
-      async push(_docs, _files) {},
+      async push() {},
       async create() {},
       async delete() {},
     };
@@ -138,7 +170,7 @@ describe("StashManager", () => {
       async fetch() {
         return new Map();
       },
-      async push(_docs, _files) {},
+      async push() {},
       async create() {},
       async delete() {},
     };

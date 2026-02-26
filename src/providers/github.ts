@@ -1,5 +1,5 @@
 import { Octokit } from "octokit";
-import type { SyncProvider } from "./types.js";
+import type { PushPayload, SyncProvider } from "./types.js";
 
 interface TreeEntry {
   path: string;
@@ -61,36 +61,141 @@ export class GitHubProvider implements SyncProvider {
     return `${this.pathPrefix}/${path}`;
   }
 
-  async create(): Promise<void> {
-    // Idempotent - check if .stash already initialized
+  private async ensureBranchExists(): Promise<string> {
     try {
-      await this.octokit.rest.repos.getContent({
+      const { data: ref } = await this.octokit.rest.git.getRef({
         owner: this.owner,
         repo: this.repo,
-        path: this.prefixPath(".stash/.gitkeep"),
+        ref: `heads/${this.branch}`,
       });
-      // Already exists, no-op
+      return ref.object.sha;
+    } catch (err) {
+      const error = err as Error & { status?: number };
+      // GitHub may report empty repos as 404 (missing ref) or 409/422.
+      if (error.status !== 404 && error.status !== 409 && error.status !== 422) {
+        throw err;
+      }
+    }
+
+    // GitHub quirk: creating blobs can fail for truly empty repositories.
+    // Bootstrap the branch with an empty commit, then continue with normal push.
+    const { data: emptyTree } = await this.octokit.rest.git.createTree({
+      owner: this.owner,
+      repo: this.repo,
+      tree: [],
+    });
+    const { data: initialCommit } = await this.octokit.rest.git.createCommit({
+      owner: this.owner,
+      repo: this.repo,
+      message: "init: bootstrap empty repository for stash sync",
+      tree: emptyTree.sha,
+      parents: [],
+    });
+    try {
+      await this.octokit.rest.git.createRef({
+        owner: this.owner,
+        repo: this.repo,
+        ref: `refs/heads/${this.branch}`,
+        sha: initialCommit.sha,
+      });
+      return initialCommit.sha;
+    } catch (err) {
+      const error = err as Error & { status?: number };
+      // Race: another writer may have created the branch between getRef and createRef.
+      if (error.status === 409 || error.status === 422) {
+        const { data: ref } = await this.octokit.rest.git.getRef({
+          owner: this.owner,
+          repo: this.repo,
+          ref: `heads/${this.branch}`,
+        });
+        return ref.object.sha;
+      }
+      throw err;
+    }
+  }
+
+  private async getHeadTreeState(
+    headSha: string,
+    includeInternal = false,
+  ): Promise<{ baseTreeSha: string; files: string[] }> {
+    const { data: commit } = await this.octokit.rest.git.getCommit({
+      owner: this.owner,
+      repo: this.repo,
+      commit_sha: headSha,
+    });
+    const baseTreeSha = commit.tree.sha;
+    const { data: tree } = await this.octokit.rest.git.getTree({
+      owner: this.owner,
+      repo: this.repo,
+      tree_sha: baseTreeSha,
+      recursive: "true",
+    });
+
+    const files: string[] = [];
+    for (const item of tree.tree) {
+      if (item.type !== "blob" || !item.path) continue;
+
+      let relativePath = item.path;
+      if (this.pathPrefix) {
+        if (!item.path.startsWith(this.pathPrefix + "/")) continue;
+        relativePath = item.path.slice(this.pathPrefix.length + 1);
+      }
+
+      if (relativePath.startsWith(".git/")) continue;
+      if (!includeInternal && relativePath.startsWith(".stash/")) continue;
+      files.push(relativePath);
+    }
+
+    return { baseTreeSha, files };
+  }
+
+  private async listRemoteFiles(includeInternal = false): Promise<string[]> {
+    try {
+      const { data: ref } = await this.octokit.rest.git.getRef({
+        owner: this.owner,
+        repo: this.repo,
+        ref: `heads/${this.branch}`,
+      });
+      const { files } = await this.getHeadTreeState(ref.object.sha, includeInternal);
+      return files;
+    } catch (err) {
+      const error = err as Error & { status?: number };
+      if (error.status === 404) return [];
+      throw err;
+    }
+  }
+
+  async create(): Promise<void> {
+    try {
+      await this.octokit.rest.repos.get({
+        owner: this.owner,
+        repo: this.repo,
+      });
       return;
     } catch (err) {
       const error = err as Error & { status?: number };
       if (error.status !== 404) throw err;
-      // Doesn't exist, create it
     }
 
-    // Create initial commit with .stash placeholder
-    // (Git API requires at least one commit before we can use blobs/trees)
+    const { data: me } = await this.octokit.rest.users.getAuthenticated();
     try {
-      await this.octokit.rest.repos.createOrUpdateFileContents({
-        owner: this.owner,
-        repo: this.repo,
-        path: this.prefixPath(".stash/.gitkeep"),
-        message: "Initialize stash",
-        content: Buffer.from("").toString("base64"),
-      });
+      if (me.login === this.owner) {
+        await this.octokit.rest.repos.createForAuthenticatedUser({
+          name: this.repo,
+          private: true,
+          auto_init: false,
+        });
+      } else {
+        await this.octokit.rest.repos.createInOrg({
+          org: this.owner,
+          name: this.repo,
+          private: true,
+        });
+      }
     } catch (err) {
       const error = err as Error & { status?: number };
-      // 422 = file already exists (race condition), that's fine
-      if (error.status === 422) return;
+      // Already created by another actor after our get() check.
+      if (error.status === 409 || error.status === 422) return;
       throw err;
     }
   }
@@ -106,7 +211,7 @@ export class GitHubProvider implements SyncProvider {
     }
 
     // With path prefix - delete only files under the prefix
-    const relativeFiles = await this.listFiles(true);
+    const relativeFiles = await this.listRemoteFiles(true);
     if (relativeFiles.length === 0) return;
 
     // Create tree entries with sha: null to delete files
@@ -162,6 +267,19 @@ export class GitHubProvider implements SyncProvider {
     const docs = new Map<string, Uint8Array>();
 
     try {
+      await this.octokit.rest.repos.get({
+        owner: this.owner,
+        repo: this.repo,
+      });
+    } catch (err) {
+      const error = err as Error & { status?: number };
+      if (error.status === 404) {
+        throw Object.assign(new Error("Remote not found"), { status: 404 });
+      }
+      throw err;
+    }
+
+    try {
       // Get structure doc
       const structureBlob = await this.getFileContent(
         this.prefixPath(".stash/structure.automerge"),
@@ -190,39 +308,68 @@ export class GitHubProvider implements SyncProvider {
     return docs;
   }
 
-  async push(docs: Map<string, Uint8Array>, files: Map<string, string | Buffer>): Promise<void> {
-    // Nothing to push if no docs
+  async push(payload: PushPayload): Promise<void> {
+    const { docs, files, changedPaths, pathsToDelete } = payload;
+
     if (docs.size === 0) return;
 
-    // Build tree entries for .stash/ files
+    const parentSha = await this.ensureBranchExists();
+
+    const changedSet = changedPaths ? new Set(changedPaths) : null;
+    const toDelete = pathsToDelete ? [...pathsToDelete] : null;
+
+    let baseTreeSha: string;
+    let existingFiles: string[] | null = null;
+    if (toDelete) {
+      const { data: commit } = await this.octokit.rest.git.getCommit({
+        owner: this.owner,
+        repo: this.repo,
+        commit_sha: parentSha,
+      });
+      baseTreeSha = commit.tree.sha;
+    } else {
+      const state = await this.getHeadTreeState(parentSha);
+      baseTreeSha = state.baseTreeSha;
+      existingFiles = state.files;
+    }
+
     const treeEntries: TreeEntry[] = [];
 
-    // Add structure doc
-    const structureData = docs.get("structure");
-    if (structureData) {
-      const blob = await this.createBlob(structureData);
-      treeEntries.push({
-        path: this.prefixPath(".stash/structure.automerge"),
-        mode: "100644",
-        type: "blob",
-        sha: blob,
-      });
+    const includePath = (treePath: string): boolean => {
+      if (!changedSet) return true;
+      const relative = this.pathPrefix ? treePath.replace(`${this.pathPrefix}/`, "") : treePath;
+      return changedSet.has(relative) || changedSet.has(treePath);
+    };
+
+    if (includePath(".stash/structure.automerge")) {
+      const structureData = docs.get("structure");
+      if (structureData) {
+        const blob = await this.createBlob(structureData);
+        treeEntries.push({
+          path: this.prefixPath(".stash/structure.automerge"),
+          mode: "100644",
+          type: "blob",
+          sha: blob,
+        });
+      }
     }
 
-    // Add file docs
     for (const [docId, data] of docs) {
       if (docId === "structure") continue;
-      const blob = await this.createBlob(data);
-      treeEntries.push({
-        path: this.prefixPath(`.stash/docs/${docId}.automerge`),
-        mode: "100644",
-        type: "blob",
-        sha: blob,
-      });
+      const docPath = `.stash/docs/${docId}.automerge`;
+      if (includePath(docPath)) {
+        const blob = await this.createBlob(data);
+        treeEntries.push({
+          path: this.prefixPath(docPath),
+          mode: "100644",
+          type: "blob",
+          sha: blob,
+        });
+      }
     }
 
-    // Add user files
     for (const [filePath, content] of files) {
+      if (!includePath(filePath)) continue;
       if (typeof content === "string") {
         treeEntries.push({
           path: this.prefixPath(filePath),
@@ -231,7 +378,6 @@ export class GitHubProvider implements SyncProvider {
           content,
         });
       } else {
-        // Binary - need to create blob first
         const blob = await this.createBlob(content);
         treeEntries.push({
           path: this.prefixPath(filePath),
@@ -242,46 +388,25 @@ export class GitHubProvider implements SyncProvider {
       }
     }
 
-    // Get current commit SHA and list existing files
-    let baseTreeSha: string | undefined;
-    let parentSha: string | undefined;
-    const existingFiles = new Set<string>();
-
-    try {
-      const { data: ref } = await this.octokit.rest.git.getRef({
-        owner: this.owner,
-        repo: this.repo,
-        ref: `heads/${this.branch}`,
-      });
-      parentSha = ref.object.sha;
-
-      const { data: commit } = await this.octokit.rest.git.getCommit({
-        owner: this.owner,
-        repo: this.repo,
-        commit_sha: parentSha,
-      });
-      baseTreeSha = commit.tree.sha;
-
-      // List existing files to compute deletions (uses efficient tree API)
-      const remoteFiles = await this.listFiles();
-      for (const file of remoteFiles) {
-        existingFiles.add(file);
-      }
-    } catch (err) {
-      const error = err as Error & { status?: number };
-      if (error.status !== 404) throw err;
-      // No commits yet, will create initial commit
-    }
-
-    // Delete files that exist on remote but not in desired state
-    for (const existingPath of existingFiles) {
-      if (!files.has(existingPath)) {
+    if (toDelete) {
+      for (const path of toDelete) {
         treeEntries.push({
-          path: this.prefixPath(existingPath),
+          path: this.prefixPath(path),
           mode: "100644",
           type: "blob",
           sha: null,
         });
+      }
+    } else if (existingFiles) {
+      for (const existingPath of existingFiles) {
+        if (!files.has(existingPath)) {
+          treeEntries.push({
+            path: this.prefixPath(existingPath),
+            mode: "100644",
+            type: "blob",
+            sha: null,
+          });
+        }
       }
     }
 
@@ -299,25 +424,16 @@ export class GitHubProvider implements SyncProvider {
       repo: this.repo,
       message: "sync: update stash",
       tree: tree.sha,
-      parents: parentSha ? [parentSha] : [],
+      parents: [parentSha],
     });
 
     // Update ref
-    if (parentSha) {
-      await this.octokit.rest.git.updateRef({
-        owner: this.owner,
-        repo: this.repo,
-        ref: `heads/${this.branch}`,
-        sha: commit.sha,
-      });
-    } else {
-      await this.octokit.rest.git.createRef({
-        owner: this.owner,
-        repo: this.repo,
-        ref: `refs/heads/${this.branch}`,
-        sha: commit.sha,
-      });
-    }
+    await this.octokit.rest.git.updateRef({
+      owner: this.owner,
+      repo: this.repo,
+      ref: `heads/${this.branch}`,
+      sha: commit.sha,
+    });
   }
 
   private async getFileContent(
@@ -370,66 +486,6 @@ export class GitHubProvider implements SyncProvider {
       encoding: "base64",
     });
     return blob.sha;
-  }
-
-  /**
-   * List all user files in the repo (excluding .git/).
-   * Uses the Git tree API for efficiency.
-   * Returns paths relative to the pathPrefix (if set).
-   * @param includeInternal - if true, includes .stash/ files (for delete operations)
-   */
-  async listFiles(includeInternal = false): Promise<string[]> {
-    try {
-      // Get current commit
-      const { data: ref } = await this.octokit.rest.git.getRef({
-        owner: this.owner,
-        repo: this.repo,
-        ref: `heads/${this.branch}`,
-      });
-
-      const { data: commit } = await this.octokit.rest.git.getCommit({
-        owner: this.owner,
-        repo: this.repo,
-        commit_sha: ref.object.sha,
-      });
-
-      // Get full tree recursively
-      const { data: tree } = await this.octokit.rest.git.getTree({
-        owner: this.owner,
-        repo: this.repo,
-        tree_sha: commit.tree.sha,
-        recursive: "true",
-      });
-
-      const files: string[] = [];
-      for (const item of tree.tree) {
-        // Only include blobs (files), not trees (directories)
-        if (item.type !== "blob" || !item.path) continue;
-
-        let relativePath = item.path;
-
-        // If we have a path prefix, only include files under it
-        if (this.pathPrefix) {
-          if (!item.path.startsWith(this.pathPrefix + "/")) continue;
-          relativePath = item.path.slice(this.pathPrefix.length + 1);
-        }
-
-        // Exclude .git/ always, .stash/ unless includeInternal
-        if (relativePath.startsWith(".git/")) continue;
-        if (!includeInternal && relativePath.startsWith(".stash/")) continue;
-
-        files.push(relativePath);
-      }
-
-      return files;
-    } catch (err) {
-      const error = err as Error & { status?: number };
-      if (error.status === 404) {
-        // Empty repo or branch doesn't exist
-        return [];
-      }
-      throw err;
-    }
   }
 
   /**

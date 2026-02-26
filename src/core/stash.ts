@@ -10,6 +10,7 @@ import {
   moveFile as moveStructureFile,
   getEntry,
   listPaths,
+  listDeletedPaths,
   isDeleted,
   type StructureDoc,
 } from "./structure.js";
@@ -24,6 +25,12 @@ import {
 } from "./file.js";
 import type { SyncProvider } from "../providers/types.js";
 import { withRetry } from "./errors.js";
+
+interface SyncSnapshot {
+  structure: string[];
+  docs: Record<string, string[]>;
+  files: Record<string, string>;
+}
 
 export interface StashMeta {
   name: string;
@@ -347,38 +354,142 @@ export class Stash {
       }
     }
 
-    // 1. Fetch remote docs
+    const beforeMerge = this.buildSyncSnapshot();
     const remoteDocs = await withRetry(() => this.provider!.fetch());
-
-    // 2. Merge remote into local
     const merged = this.mergeWithRemote(remoteDocs);
 
-    // 3. Build files map (complete desired state)
+    if (remoteDocs.size === 0) {
+      // First sync or empty remote: always push
+    } else {
+      const remoteSnapshot = this.buildSnapshotFromDocs(remoteDocs);
+      const mergedSnapshot = this.buildSyncSnapshot();
+      if (this.snapshotsEqual(remoteSnapshot, mergedSnapshot)) {
+        await this.save();
+        return;
+      }
+    }
+
+    const changedPaths = this.computeChangedPaths(beforeMerge, this.buildSyncSnapshot());
+    const pathsToDelete = listDeletedPaths(this.structureDoc);
+    const files = await this.buildFilesMap();
+
+    await withRetry(() =>
+      this.provider!.push({
+        docs: merged,
+        files,
+        changedPaths,
+        pathsToDelete,
+      }),
+    );
+
+    await this.save();
+  }
+
+  private buildSnapshotFromDocs(docs: Map<string, Uint8Array>): SyncSnapshot {
+    const structureData = docs.get("structure");
+    if (!structureData) {
+      return { structure: [], docs: {}, files: {} };
+    }
+    const structureDoc = Automerge.load<StructureDoc>(structureData);
+    const structure = Automerge.getHeads(structureDoc);
+    const docEntries: Record<string, string[]> = {};
+    const fileEntries: Record<string, string> = {};
+    for (const [docId, data] of docs) {
+      if (docId === "structure") continue;
+      const doc = Automerge.load<FileDoc>(data);
+      docEntries[docId] = Automerge.getHeads(doc);
+    }
+    for (const filePath of listPaths(structureDoc)) {
+      const entry = getEntry(structureDoc, filePath);
+      if (!entry) continue;
+      const data = docs.get(entry.docId);
+      if (!data) continue;
+      const doc = Automerge.load<FileDoc>(data);
+      fileEntries[filePath] =
+        doc.type === "binary" ? doc.hash : Automerge.getHeads(doc).join(",");
+    }
+    return { structure, docs: docEntries, files: fileEntries };
+  }
+
+  private buildSyncSnapshot(): SyncSnapshot {
+    const structure = Automerge.getHeads(this.structureDoc);
+    const docs: Record<string, string[]> = {};
+    const files: Record<string, string> = {};
+    for (const [docId, doc] of this.fileDocs) {
+      docs[docId] = Automerge.getHeads(doc);
+    }
+    for (const filePath of listPaths(this.structureDoc)) {
+      const entry = getEntry(this.structureDoc, filePath);
+      if (!entry) continue;
+      const doc = this.fileDocs.get(entry.docId);
+      if (!doc) continue;
+      files[filePath] =
+        doc.type === "binary" ? doc.hash : Automerge.getHeads(doc).join(",");
+    }
+    return { structure, docs, files };
+  }
+
+  private snapshotsEqual(a: SyncSnapshot, b: SyncSnapshot): boolean {
+    if (
+      a.structure.length !== b.structure.length ||
+      a.structure.some((h, i) => h !== b.structure[i])
+    ) {
+      return false;
+    }
+    const docIds = new Set([...Object.keys(a.docs), ...Object.keys(b.docs)]);
+    for (const docId of docIds) {
+      const ah = a.docs[docId];
+      const bh = b.docs[docId];
+      if (!ah || !bh || ah.length !== bh.length || ah.some((h, i) => h !== bh[i])) {
+        return false;
+      }
+    }
+    const paths = new Set([...Object.keys(a.files), ...Object.keys(b.files)]);
+    for (const p of paths) {
+      if (a.files[p] !== b.files[p]) return false;
+    }
+    return true;
+  }
+
+  private computeChangedPaths(before: SyncSnapshot, after: SyncSnapshot): Set<string> {
+    const changed = new Set<string>();
+    const beforeHeads = before.structure.join(",");
+    const afterHeads = after.structure.join(",");
+    if (beforeHeads !== afterHeads) {
+      changed.add(".stash/structure.automerge");
+    }
+    const docIds = new Set([...Object.keys(before.docs), ...Object.keys(after.docs)]);
+    for (const docId of docIds) {
+      const b = before.docs[docId]?.join(",") ?? "";
+      const a = after.docs[docId]?.join(",") ?? "";
+      if (b !== a) changed.add(`.stash/docs/${docId}.automerge`);
+    }
+    const paths = new Set([...Object.keys(before.files), ...Object.keys(after.files)]);
+    for (const p of paths) {
+      if (before.files[p] !== after.files[p]) changed.add(p);
+    }
+    return changed;
+  }
+
+  private async buildFilesMap(): Promise<Map<string, string | Buffer>> {
     const files = new Map<string, string | Buffer>();
     for (const [filePath, entry] of Object.entries(this.structureDoc.files)) {
       if (entry.deleted) continue;
-
       const doc = this.fileDocs.get(entry.docId);
       if (!doc) continue;
-
       if (doc.type === "text") {
         files.set(filePath, getContent(doc));
       } else if (doc.type === "binary") {
-        // For binary files, read from blob storage
         const blobPath = path.join(this.path, ".stash", "blobs", `${doc.hash}.bin`);
         try {
-          const content = await import("node:fs/promises").then(fs => fs.readFile(blobPath));
+          const content = await fs.readFile(blobPath);
           files.set(filePath, content);
         } catch {
           // Blob not found, skip
         }
       }
     }
-
-    // 4. Push merged docs + files to remote
-    await withRetry(() => this.provider!.push(merged, files));
-
-    await this.save();
+    return files;
   }
 
   /**

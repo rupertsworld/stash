@@ -150,8 +150,8 @@ describe("Stash", () => {
       async fetch() {
         return new Map(stored);
       },
-      async push(docs, _files) {
-        stored = new Map(docs);
+      async push(payload) {
+        stored = new Map(payload.docs);
       },
       async create() {},
       async delete() {},
@@ -181,8 +181,8 @@ describe("Stash", () => {
       async fetch() {
         return new Map(stored);
       },
-      async push(docs, _files) {
-        stored = new Map(docs);
+      async push(payload) {
+        stored = new Map(payload.docs);
       },
       async create() {},
       async delete() {},
@@ -202,6 +202,38 @@ describe("Stash", () => {
     console.warn = origWarn;
 
     expect(stash.read("file.md")).toBe("content");
+  });
+
+  it("should skip push when state unchanged (no-op sync)", async () => {
+    let stored = new Map<string, Uint8Array>();
+    let pushCount = 0;
+    const mockProvider: SyncProvider = {
+      async fetch() {
+        return new Map(stored);
+      },
+      async push(payload) {
+        stored = new Map(payload.docs);
+        pushCount++;
+      },
+      async create() {},
+      async delete() {},
+    };
+
+    const stash = Stash.create(
+      "test",
+      tmpDir,
+      TEST_ACTOR_ID,
+      mockProvider,
+      "mock:test",
+    );
+    stash.write("file.md", "content");
+    await stash.flush();
+    await stash.sync();
+    expect(pushCount).toBe(1);
+
+    pushCount = 0;
+    await stash.sync();
+    expect(pushCount).toBe(0);
   });
 
   it("should get meta info", () => {
@@ -292,7 +324,7 @@ describe("Stash", () => {
           syncCalled = true;
           return new Map();
         },
-        async push(_docs, _files) {},
+        async push() {},
         async create() {},
         async delete() {},
       };
@@ -325,7 +357,7 @@ describe("Stash", () => {
           await fetchPromise;
           return new Map();
         },
-        async push(_docs, _files) {},
+        async push() {},
         async create() {},
         async delete() {},
       };
@@ -366,7 +398,7 @@ describe("Stash", () => {
           await fetchPromise;
           return new Map();
         },
-        async push(_docs, _files) {},
+        async push() {},
         async create() {},
         async delete() {},
       };

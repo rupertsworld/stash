@@ -27,8 +27,8 @@ class MockRemote implements SyncProvider {
     return new Map(this.remoteDocs);
   }
 
-  async push(docs: Map<string, Uint8Array>, _files: Map<string, string | Buffer>): Promise<void> {
-    for (const [docId, data] of docs) {
+  async push(payload: { docs: Map<string, Uint8Array> }): Promise<void> {
+    for (const [docId, data] of payload.docs) {
       this.remoteDocs.set(docId, data);
     }
   }

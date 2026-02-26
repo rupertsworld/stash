@@ -16,3 +16,8 @@ export const remoteOption = new Option(
   "--remote <remote>",
   "sync remote (none, github:owner/repo)",
 );
+
+export const createOption = new Option(
+  "--create",
+  "create the remote if it doesn't exist (use with --remote)",
+);

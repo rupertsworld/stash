@@ -200,7 +200,7 @@ export class StashManager {
 
     if (deleteRemote) {
       const provider = stash.getProvider();
-      if (provider) {
+      if (provider?.delete) {
         await provider.delete();
       }
     }

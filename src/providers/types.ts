@@ -1,4 +1,17 @@
 /**
+ * Payload for push. When changedPaths is omitted, provider pushes everything.
+ * When present, provider creates blobs/tree entries only for those paths.
+ */
+export interface PushPayload {
+  docs: Map<string, Uint8Array>;
+  files: Map<string, string | Buffer>;
+  /** Tree paths to update. Omit = push all. */
+  changedPaths?: Iterable<string>;
+  /** User paths to remove. Omit = none. */
+  pathsToDelete?: Iterable<string>;
+}
+
+/**
  * SyncProvider interface for syncing stash documents with remote storage.
  *
  * The provider is a transport layer - it fetches and pushes documents.
@@ -17,20 +30,21 @@ export interface SyncProvider {
   /**
    * Push to remote storage.
    *
-   * @param docs - Automerge blobs to store in .stash/ folder
-   * @param files - Complete desired file state. Provider makes remote match this.
-   *                Files not in this map should be deleted from remote.
+   * @param payload - docs, files, and optional changedPaths/pathsToDelete for incremental push.
    */
-  push(docs: Map<string, Uint8Array>, files: Map<string, string | Buffer>): Promise<void>;
+  push(payload: PushPayload): Promise<void>;
 
   /**
-   * Create remote storage. Idempotent - no-op if already exists.
-   * Throws only on actual errors (permissions, quota, etc.)
+   * Ensure remote storage exists so we can push (e.g. create the repo if missing).
+   * Optional: omit if this provider cannot create the remote.
+   * Callers must check `if (provider.create)` before calling.
    */
-  create(): Promise<void>;
+  create?(): Promise<void>;
 
   /**
-   * Delete remote storage.
+   * Destroy remote storage.
+   * Optional: omit if this provider cannot delete the remote.
+   * Callers must check `if (provider.delete)` before calling.
    */
-  delete(): Promise<void>;
+  delete?(): Promise<void>;
 }
