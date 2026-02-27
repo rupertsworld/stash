@@ -11,7 +11,7 @@ The `Stash` class manages CRDT state for a single stash. Source: `core/stash.ts`
 ## Concepts
 
 - **Known paths**: Local-only set of paths this machine has seen; persisted in `known-paths.json`. Used to tell "deleted here" vs "never seen" so we can resurrect files from disk or remote when appropriate. Not synced.
-- **Sync**: With a provider, sync fetches remote, merges (see below), builds file map, pushes, then saves. No-op without provider; guarded so only one sync runs at a time. Dangling doc refs are fixed before fetch (empty text doc created if missing). **Optimizations**: snapshot before merge; if merged state equals snapshot and remote had content, skip push; otherwise push only changed paths (structure, docs, user files) and derive deletions from structure tombstones; no `getTree`/`listFiles` needed.
+- **Sync**: With a provider, sync fetches remote, merges (see below), builds push payload (`docs`, `files`, `changedPaths`, `pathsToDelete`), pushes, then saves. No-op without provider; guarded so only one sync runs at a time. Dangling doc refs are fixed before fetch (empty text doc created if missing).
 - **Conflict resolution**: In `mergeWithRemote`. Fresh join (local empty): adopt remote structure and file docs, mark paths known. Normal merge: snapshot local-only new files, merge structure and file docs, restore clobbered locals, then apply content-wins rule for tombstones (if both sides have content and differ, non-empty content clears the tombstone to avoid data loss). Detail in `core/stash.ts`.
 
 ## Doc access and metadata

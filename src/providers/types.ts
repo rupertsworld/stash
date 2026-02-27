@@ -1,11 +1,12 @@
 /**
- * Payload for push. When changedPaths is omitted, provider pushes everything.
- * When present, provider creates blobs/tree entries only for those paths.
+ * Payload for push.
+ * - changedPaths omitted or empty: push everything (e.g. first sync).
+ * - changedPaths non-empty: create blobs/tree entries only for those paths (incremental).
  */
 export interface PushPayload {
   docs: Map<string, Uint8Array>;
   files: Map<string, string | Buffer>;
-  /** Tree paths to update. Omit = push all. */
+  /** Tree paths to update. Omit or empty = push all. Non-empty = incremental. */
   changedPaths?: Iterable<string>;
   /** User paths to remove. Omit = none. */
   pathsToDelete?: Iterable<string>;

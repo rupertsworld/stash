@@ -171,6 +171,39 @@ describe("Stash", () => {
     expect(stash.read("file.md")).toBe("content");
   });
 
+  it("builds push payload with docs and files", async () => {
+    let capturedPayload: any = null;
+    const mockProvider = {
+      async fetch() {
+        return new Map<string, Uint8Array>();
+      },
+      async push(payload: unknown) {
+        capturedPayload = payload;
+      },
+      async create() {},
+      async delete() {},
+    } as unknown as SyncProvider;
+
+    const stash = Stash.create(
+      "test",
+      tmpDir,
+      TEST_ACTOR_ID,
+      mockProvider,
+      "mock:test",
+    );
+    stash.write("hello.md", "Hello!");
+    await stash.flush();
+    await stash.sync();
+
+    expect(capturedPayload).toBeTruthy();
+    expect(capturedPayload.docs).toBeTruthy();
+    expect(capturedPayload.files).toBeTruthy();
+    expect(capturedPayload.docs.has("structure")).toBe(true);
+    expect(capturedPayload.docs.size).toBeGreaterThanOrEqual(2); // structure + at least one file doc
+    expect(capturedPayload.files.has("hello.md")).toBe(true);
+    expect(capturedPayload.files.get("hello.md")).toBe("Hello!");
+  });
+
   it("should handle dangling refs during sync", async () => {
     const warnSpy: string[] = [];
     const origWarn = console.warn;

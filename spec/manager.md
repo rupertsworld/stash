@@ -6,7 +6,7 @@ Orchestrates multiple stashes. Source: `core/manager.ts`, `core/config.ts`. Load
 
 ## Role
 
-- **Loading**: `StashManager.load(baseDir?)` reads config, loads each registered stash via `Stash.load`, attaches provider where `meta.remote` is set. Warns and skips stashes that fail to load. Default baseDir: `~/.stash/`.
+- **Loading**: `StashManager.load(baseDir?)` reads config, loads each registered stash via `Stash.load`, attaches provider where `meta.remote` is set. If a registered stash path is missing (`ENOENT`), it is treated as stale registration: manager removes it from config and notifies the user. Other load failures are warned and skipped. Default baseDir: `~/.stash/`.
 - **Operations**: get, list, create, connect, delete, sync, reload, reloadIfStale. Create/connect validate name and path; create can import existing files from disk; connect pulls from remote. Delete: if deleteRemote and provider implements `delete?()`, calls it then removes local stash; otherwise removes local only. `reloadIfStale()` (used by MCP) reloads only if >2s since last reload. API detail: see `StashManager` in `core/manager.ts`.
 
 ## Invariants

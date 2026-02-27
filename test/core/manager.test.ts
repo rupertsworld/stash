@@ -128,6 +128,23 @@ describe("StashManager", () => {
     expect(loaded.read("readme.md")).toBe("Hello");
   });
 
+  it("should remove stale stash registrations and notify user on ENOENT", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const manager1 = await StashManager.load(tmpDir);
+    const stash = await manager1.create("stale");
+    await stash.flush();
+
+    await fs.rm(stash.path, { recursive: true, force: true });
+
+    const manager2 = await StashManager.load(tmpDir);
+    expect(manager2.get("stale")).toBeUndefined();
+    const cfg = await config.readConfig(tmpDir);
+    expect(cfg.stashes["stale"]).toBeUndefined();
+    expect(warnSpy).toHaveBeenCalled();
+
+    warnSpy.mockRestore();
+  });
+
   it("should sync all stashes", async () => {
     const syncCalls: string[] = [];
     const mockProvider: SyncProvider = {

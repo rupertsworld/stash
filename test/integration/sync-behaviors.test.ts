@@ -54,6 +54,21 @@ async function settle(ms = 300): Promise<void> {
   await new Promise((r) => setTimeout(r, ms));
 }
 
+/** Poll until predicate is true or timeout. Use for watcher-driven state changes. */
+async function waitFor(
+  predicate: () => boolean,
+  opts: { timeout?: number; interval?: number } = {},
+): Promise<void> {
+  const { timeout = 5000, interval = 50 } = opts;
+  const start = Date.now();
+  while (!predicate()) {
+    if (Date.now() - start > timeout) {
+      throw new Error(`Timeout after ${timeout}ms waiting for predicate`);
+    }
+    await new Promise((r) => setTimeout(r, interval));
+  }
+}
+
 describe("Sync Behaviors", { timeout: 15000 }, () => {
   let tmpDirA: string;
   let tmpDirB: string;
@@ -66,6 +81,7 @@ describe("Sync Behaviors", { timeout: 15000 }, () => {
   });
 
   afterEach(async () => {
+    await settle(200); // Let watchers release handles before cleanup
     await fs.rm(tmpDirA, { recursive: true, force: true });
     await fs.rm(tmpDirB, { recursive: true, force: true });
   });
@@ -490,18 +506,15 @@ describe("Sync Behaviors", { timeout: 15000 }, () => {
       const reconciler = new StashReconciler(stash);
       await reconciler.start();
 
-      // Create a binary file on disk
+      // Create a binary file on disk; wait for watcher to import (polling avoids flakiness)
       const binaryContent = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0x01, 0x02]);
       await fs.writeFile(path.join(tmpDirA, "image.png"), binaryContent);
-      await settle(800);
-
-      // Verify it was imported
-      expect(stash.list()).toContain("image.png");
+      await waitFor(() => stash.list().includes("image.png"));
 
       // Delete binary file from disk
       await fs.unlink(path.join(tmpDirA, "image.png"));
 
-      // Flush before delete debounce completes
+      // Flush before delete debounce (500ms) completes — should tombstone, not recreate
       await reconciler.flush();
 
       // File should still be gone from disk
@@ -509,8 +522,11 @@ describe("Sync Behaviors", { timeout: 15000 }, () => {
         fs.access(path.join(tmpDirA, "image.png"))
       ).rejects.toThrow();
 
-      await settle(800);
-      expect(stash.list()).not.toContain("image.png");
+      // Wait for delete debounce to finalize
+      await waitFor(() => !stash.list().includes("image.png"), {
+        timeout: 2000,
+        interval: 50,
+      });
 
       await reconciler.close();
     });
