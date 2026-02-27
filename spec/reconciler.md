@@ -2,9 +2,16 @@
 
 `StashReconciler` keeps filesystem and Automerge state in sync. One per stash. Source: `core/reconciler.ts`. Operates on a [Stash](./stash.md) instance.
 
-## Role
+## API
 
-- **Lifecycle**: `start()` initializes disk snapshots for tracked text files and starts chokidar; `close()` stops watcher and timers; `scan()` one-time full disk reconcile; `flush()` writes Automerge to disk then reconciles.
+| Method | Behavior |
+|--------|----------|
+| `start()` | Initialize disk snapshots, start chokidar. |
+| `close()` | Stop watcher, clear pending-delete timers, clear snapshots. |
+| `scan()` | One-time full reconcile: import disk-only files, delete Automerge-only. |
+| `flush()` | Write all tracked files to disk, run orphan cleanup, re-check for changes during write. |
+
+## Role
 - **File watcher**: Chokidar on stash path, ignoring `.stash/` and hidden files, no symlinks, 200ms write stability. Events: add → onFileCreated, change → onFileModified, unlink → onFileDeleted. Handlers skip work when `writing` is true (avoids feedback during flush). Watch mode defaults to native filesystem events; polling can be enabled with `STASH_USE_POLLING=1` (tests also run with polling for deterministic event delivery).
 
 ## Concepts

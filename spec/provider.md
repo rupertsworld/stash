@@ -6,7 +6,19 @@ Transport layer for fetching and pushing Automerge docs and file content. Merge 
 
 ## Interface
 
-`SyncProvider`: `fetch()` returns map of doc id → Automerge bytes; `push(payload)` applies file-level changes to remote; optional `create?()` — if present, ensures remote storage exists (so we can push); optional `delete?()` — if present, destroys remote storage. Key `"structure"` for structure doc, ULID keys for file docs. Missing remote storage should surface via `fetch()` (e.g. GitHub provider throws 404 when repo does not exist). Callers check `if (provider.create)` / `if (provider.delete)` before calling. See `providers/types.ts` for the full interface.
+```ts
+interface SyncProvider {
+  fetch(): Promise<Map<string, Uint8Array>>;
+  push(payload: PushPayload): Promise<void>;
+  create?(): Promise<void>;   // optional: ensure remote exists
+  delete?(): Promise<void>;   // optional: destroy remote
+}
+```
+
+- **fetch()**: Returns map of doc id → Automerge bytes. Key `"structure"` for structure doc, ULID keys for file docs. Empty map if remote has no docs. Missing remote (e.g. repo not found) surfaces via thrown error (GitHub: 404).
+- **push(payload)**: Applies file-level changes to remote. Transport-only; no merge logic.
+- **create?()**: If present, ensures remote storage exists so we can push. Callers check `if (provider.create)` before calling.
+- **delete?()**: If present, destroys remote storage. Callers check `if (provider.delete)` before calling.
 
 ### Push payload
 

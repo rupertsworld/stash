@@ -14,6 +14,24 @@ The `Stash` class manages CRDT state for a single stash. Source: `core/stash.ts`
 - **Sync**: With a provider, sync fetches remote, merges (see below), builds push payload (`docs`, `files`, `changedPaths`, `pathsToDelete`), pushes, then saves. No-op without provider; guarded so only one sync runs at a time. Dangling doc refs are fixed before fetch (empty text doc created if missing).
 - **Conflict resolution**: In `mergeWithRemote`. Fresh join (local empty): adopt remote structure and file docs, mark paths known. Normal merge: snapshot local-only new files, merge structure and file docs, restore clobbered locals, then apply content-wins rule for tombstones (if both sides have content and differ, non-empty content clears the tombstone to avoid data loss). Detail in `core/stash.ts`.
 
-## Doc access and metadata
+## API (public surface)
 
-Lower-level doc access (`getDocId`, `getFileDoc`, `setFileDoc`, `cloneFileDoc`, etc.) and metadata (`getMeta`, `setMeta`, provider, actorId, dirty, flush) are used by the reconciler and sync. See `Stash` in `core/stash.ts` for the full API.
+| Method | Behavior |
+|--------|----------|
+| `static create(name, path, actorId, provider?, remote?, description?)` | New in-memory stash; no disk write. |
+| `static load(name, path, actorId, provider?)` | Load from disk; returns `Promise<Stash>`. |
+| `read(path)` | Text content; throws if not found or binary. |
+| `write(path, content)` | Create or overwrite text file; schedules save. |
+| `writeBinary(path, hash, size)` | Create or update binary file; schedules save. |
+| `patch(path, start, end, text)` | Apply positional patch to text; throws if not found. |
+| `delete(path)` | Tombstone file; schedules save. |
+| `move(from, to)` / `renameFile(from, to)` | Move entry; preserves doc identity. |
+| `list(dir?)` | List paths (files and dirs) at root or under `dir`. |
+| `glob(pattern)` | Paths matching minimatch pattern. |
+| `listAllFiles()` | `[path, docId][]` for all non-deleted. |
+| `sync()` | Fetch, merge, push, save; no-op without provider; single-flight. |
+| `save()` | Persist meta, structure, docs, known-paths. |
+| `getMeta()` / `setMeta(meta)` | Read/write metadata. |
+| `getProvider()` / `setProvider()` | Get/set sync provider. |
+
+Lower-level doc access (`getDocId`, `getFileDoc`, `setFileDoc`, `cloneFileDoc`, `isKnownPath`, `addKnownPath`, etc.) and `flush()` are used by the reconciler and sync. See `Stash` in `core/stash.ts` for the full API.

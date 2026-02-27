@@ -38,6 +38,25 @@ A local-first collaborative folder service. Multiple editors (humans and AI agen
 | [mcp](./mcp.md) | `mcp.ts`, `mcp-server.ts` | MCP tools for AI agents, HTTP and stdio transports |
 | [cli](./cli.md) | `cli.ts`, `cli/` | Command-line interface, interactive prompts |
 
+## Agent / Developer Guide
+
+**Before making changes:** Read this spec and the module specs in `specs/` to understand architecture, data model, and conventions.
+
+- **High-level design and invariants**: This spec and the module specs describe what each part does and key rules. They stay high-level; the code is the source of truth for API detail. Use TypeScript types and JSDoc in `src/` for method signatures, options, and edge cases. When a spec says "see … in src/…", look there for authoritative behavior.
+- **When changing behavior**: Update the code and JSDoc first; only touch the spec if the *role* or *invariants* of a module change.
+
+**Entry points:**
+
+| Entry | File | Purpose |
+|-------|------|---------|
+| CLI | `src/cli.ts` | All `stash` subcommands; delegates to `cli/commands/*.ts`. |
+| Daemon | `src/daemon.ts` | Background process: reconcilers, HTTP server (port 32847), periodic sync. |
+| MCP (stdio) | `src/mcp-server.ts` | Standalone MCP server over stdio for AI clients. |
+
+**Source layout:** `src/core/` — Stash, structure/file CRDT helpers, manager, config, reconciler, errors. `src/providers/` — Sync provider interface, GitHub implementation. `src/cli/` — Commander setup, one file per command. `src/mcp.ts` — MCP server and tools (stash_list, stash_read, stash_write, etc.); tools use the filesystem; reconciler syncs into Automerge.
+
+**Tests:** `tests/` (structure, file, stash, manager, config, reconciler, providers, daemon, mcp, cli). Run: `npm test`.
+
 ## Data Model
 
 ### Global Config
@@ -91,7 +110,7 @@ Each stash is a directory containing user files and a `.stash/` metadata folder:
 interface StashMeta {
   name: string;
   description?: string;
-  remote?: string | null;   // e.g. "github:owner/repo" or "github:owner/repo/folder"
+  remote?: string | null;   // e.g. "github:owner/repo"
 }
 ```
 
@@ -161,7 +180,7 @@ User files on disk are the source of truth. The reconciler watches disk and sync
 
 ### Atomic Writes
 
-All file persistence uses atomic writes: write to a temp file (`<path>.<random>.tmp`) then `fs.rename` to target. Prevents corruption on crash.
+Stash metadata (meta.json, structure.automerge, docs/*.automerge, known-paths.json) uses atomic writes: write to a temp file (`<path>.<random>.tmp`) then `fs.rename` to target. Prevents corruption on crash. Config and PID files use direct write (single-writer, low concurrency risk).
 
 ### UTF-8 Detection
 

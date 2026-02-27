@@ -9,6 +9,17 @@ MCP tools for AI agents to work with stash files. Source: `mcp.ts`, `mcp-server.
 
 ## Tools
 
-`stash_list` — list stashes or directory contents. `stash_glob` — paths matching a glob. `stash_read` / `stash_write` — file content (full read/write). `stash_edit` — find/replace by unique old string. `stash_delete` — single path or glob. `stash_move` — rename/move. `stash_grep` — regex search over file contents.
+All tools return JSON in MCP text content; errors as `{ error: message }`.
 
-All return JSON in MCP text content; errors as `{ error: message }`. Parameter and behavior detail: see tool implementations in `mcp.ts`.
+| Tool | Params | Returns | Behavior |
+|------|--------|--------|----------|
+| `stash_list` | `stash?`, `path?` | `{ stashes }` or `{ items }` | No stash: list all stashes (name, description, path). With stash: list files at path (root if omitted). |
+| `stash_glob` | `stash`, `glob` | `{ files }` | Paths matching minimatch pattern. |
+| `stash_read` | `stash`, `path` | `{ content }` | File content (UTF-8). |
+| `stash_write` | `stash`, `path`, `content` | `{ success }` | Full content replacement; creates if missing. |
+| `stash_edit` | `stash`, `path`, `old_string`, `new_string` | `{ success }` | Find/replace; `old_string` must be unique. |
+| `stash_delete` | `stash`, `path` or `glob` | `{ success }` or `{ success, deleted }` | Single path or glob; path and glob mutually exclusive. |
+| `stash_move` | `stash`, `from`, `to` | `{ success }` | Rename/move; reconciler detects rename. |
+| `stash_grep` | `stash`, `pattern`, `glob?` | `{ matches }` | Regex search; `matches`: `[{ path, line, content }]`. |
+
+Tools read/write the filesystem; reconciler syncs into Automerge. Same path as user edits.

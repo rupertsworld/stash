@@ -77,7 +77,7 @@ stash_write({ stash: "notes", path: "todo.md", content: "..." })
 
 ## Architecture
 
-See [spec/SPEC.md](spec/SPEC.md) for detailed system documentation.
+See [spec/index.md](spec/index.md) for detailed system documentation.
 
 Key features:
 - **Filesystem-first**: Edit files normally, reconciler syncs to CRDTs
