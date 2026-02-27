@@ -16,6 +16,7 @@ export async function syncStashes(name?: string): Promise<void> {
       await reconciler.scan();
 
       await stash.sync();
+      await reconciler.flush();
       console.log(`Synced: ${name}`);
     } catch (err) {
       console.error(`Failed to sync ${name}: ${(err as Error).message}`);
@@ -24,12 +25,18 @@ export async function syncStashes(name?: string): Promise<void> {
   } else {
     try {
       // Scan disk for all stashes before syncing
-      for (const stash of manager.getStashes().values()) {
+      const reconcilers = new Map<string, StashReconciler>();
+      for (const [name, stash] of manager.getStashes()) {
         const reconciler = new StashReconciler(stash);
         await reconciler.scan();
+        reconcilers.set(name, reconciler);
       }
 
       await manager.sync();
+
+      for (const reconciler of reconcilers.values()) {
+        await reconciler.flush();
+      }
       console.log("All stashes synced.");
     } catch (err) {
       if (err instanceof AggregateError) {

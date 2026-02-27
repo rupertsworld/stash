@@ -2,6 +2,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import * as crypto from "node:crypto";
 import { Stash, type StashMeta } from "./stash.js";
+import { StashReconciler } from "./reconciler.js";
 import {
   DEFAULT_STASH_DIR,
   ensureConfig,
@@ -201,6 +202,10 @@ export class StashManager {
 
     // Sync to pull remote content
     await stash.sync();
+
+    // Render files to disk
+    const reconciler = new StashReconciler(stash);
+    await reconciler.flush();
 
     // Register in global config
     await registerStash(localName, resolvedPath, this.baseDir);
