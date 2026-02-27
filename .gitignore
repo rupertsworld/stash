@@ -2,3 +2,4 @@ node_modules/
 dist/
 .claude/
 .notes/
+.DS_Store
