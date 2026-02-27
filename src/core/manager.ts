@@ -54,6 +54,7 @@ export class StashManager {
   ): Promise<StashManager> {
     const config = await ensureConfig(baseDir);
     const stashes = new Map<string, Stash>();
+    const staleRegistrations: string[] = [];
 
     for (const [name, stashPath] of Object.entries(config.stashes)) {
       try {
@@ -82,8 +83,23 @@ export class StashManager {
         const stash = await Stash.load(name, stashPath, config.actorId, provider);
         stashes.set(name, stash);
       } catch (err) {
-        console.warn(`Failed to load stash ${name}: ${(err as Error).message}`);
+        const error = err as Error & { code?: string };
+        if (error.code === "ENOENT") {
+          staleRegistrations.push(name);
+          continue;
+        }
+        console.warn(`Failed to load stash ${name}: ${error.message}`);
       }
+    }
+
+    if (staleRegistrations.length > 0) {
+      for (const name of staleRegistrations) {
+        await unregisterStash(name, baseDir);
+        delete config.stashes[name];
+      }
+      console.warn(
+        `Removed stale stash registration(s): ${staleRegistrations.join(", ")}`,
+      );
     }
 
     return new StashManager(stashes, config, baseDir);
@@ -200,7 +216,7 @@ export class StashManager {
 
     if (deleteRemote) {
       const provider = stash.getProvider();
-      if (provider) {
+      if (provider?.delete) {
         await provider.delete();
       }
     }

@@ -8,6 +8,7 @@ import {
   getEntry,
   listPaths,
   listAllPathsIncludingDeleted,
+  listDeletedPaths,
   isDeleted,
 } from "../../src/core/structure.js";
 
@@ -47,6 +48,7 @@ describe("Structure Document", () => {
     expect(doc3.files["hello.md"].docId).toBe(docId);
     // But not listed in active paths
     expect(listPaths(doc3)).toEqual([]);
+    expect(listDeletedPaths(doc3)).toEqual(["hello.md"]);
   });
 
   it("should rename/move preserving docId", () => {
@@ -153,6 +155,20 @@ describe("Structure Document", () => {
       const allPaths = listAllPathsIncludingDeleted(doc4);
       expect(allPaths).toContain("keep.md");
       expect(allPaths).toContain("delete.md");
+    });
+
+    it("should list only deleted paths in listDeletedPaths", () => {
+      const doc = createStructureDoc();
+      const { doc: doc2 } = addFile(doc, "keep.md");
+      const { doc: doc3 } = addFile(doc2, "delete1.md");
+      const { doc: doc4 } = addFile(doc3, "delete2.md");
+      const doc5 = removeFile(doc4, "delete1.md");
+      const doc6 = removeFile(doc5, "delete2.md");
+
+      expect(listDeletedPaths(doc6)).toEqual(
+        expect.arrayContaining(["delete1.md", "delete2.md"]),
+      );
+      expect(listDeletedPaths(doc6)).toHaveLength(2);
     });
 
     it("should check if file is deleted with isDeleted", () => {

@@ -150,8 +150,8 @@ describe("Stash", () => {
       async fetch() {
         return new Map(stored);
       },
-      async push(docs, _files) {
-        stored = new Map(docs);
+      async push(payload) {
+        stored = new Map(payload.docs);
       },
       async create() {},
       async delete() {},
@@ -171,6 +171,39 @@ describe("Stash", () => {
     expect(stash.read("file.md")).toBe("content");
   });
 
+  it("builds push payload with docs and files", async () => {
+    let capturedPayload: any = null;
+    const mockProvider = {
+      async fetch() {
+        return new Map<string, Uint8Array>();
+      },
+      async push(payload: unknown) {
+        capturedPayload = payload;
+      },
+      async create() {},
+      async delete() {},
+    } as unknown as SyncProvider;
+
+    const stash = Stash.create(
+      "test",
+      tmpDir,
+      TEST_ACTOR_ID,
+      mockProvider,
+      "mock:test",
+    );
+    stash.write("hello.md", "Hello!");
+    await stash.flush();
+    await stash.sync();
+
+    expect(capturedPayload).toBeTruthy();
+    expect(capturedPayload.docs).toBeTruthy();
+    expect(capturedPayload.files).toBeTruthy();
+    expect(capturedPayload.docs.has("structure")).toBe(true);
+    expect(capturedPayload.docs.size).toBeGreaterThanOrEqual(2); // structure + at least one file doc
+    expect(capturedPayload.files.has("hello.md")).toBe(true);
+    expect(capturedPayload.files.get("hello.md")).toBe("Hello!");
+  });
+
   it("should handle dangling refs during sync", async () => {
     const warnSpy: string[] = [];
     const origWarn = console.warn;
@@ -181,8 +214,8 @@ describe("Stash", () => {
       async fetch() {
         return new Map(stored);
       },
-      async push(docs, _files) {
-        stored = new Map(docs);
+      async push(payload) {
+        stored = new Map(payload.docs);
       },
       async create() {},
       async delete() {},
@@ -202,6 +235,38 @@ describe("Stash", () => {
     console.warn = origWarn;
 
     expect(stash.read("file.md")).toBe("content");
+  });
+
+  it("should skip push when state unchanged (no-op sync)", async () => {
+    let stored = new Map<string, Uint8Array>();
+    let pushCount = 0;
+    const mockProvider: SyncProvider = {
+      async fetch() {
+        return new Map(stored);
+      },
+      async push(payload) {
+        stored = new Map(payload.docs);
+        pushCount++;
+      },
+      async create() {},
+      async delete() {},
+    };
+
+    const stash = Stash.create(
+      "test",
+      tmpDir,
+      TEST_ACTOR_ID,
+      mockProvider,
+      "mock:test",
+    );
+    stash.write("file.md", "content");
+    await stash.flush();
+    await stash.sync();
+    expect(pushCount).toBe(1);
+
+    pushCount = 0;
+    await stash.sync();
+    expect(pushCount).toBe(0);
   });
 
   it("should get meta info", () => {
@@ -292,7 +357,7 @@ describe("Stash", () => {
           syncCalled = true;
           return new Map();
         },
-        async push(_docs, _files) {},
+        async push() {},
         async create() {},
         async delete() {},
       };
@@ -325,7 +390,7 @@ describe("Stash", () => {
           await fetchPromise;
           return new Map();
         },
-        async push(_docs, _files) {},
+        async push() {},
         async create() {},
         async delete() {},
       };
@@ -366,7 +431,7 @@ describe("Stash", () => {
           await fetchPromise;
           return new Map();
         },
-        async push(_docs, _files) {},
+        async push() {},
         async create() {},
         async delete() {},
       };

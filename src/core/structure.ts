@@ -84,3 +84,12 @@ export function listPaths(doc: Automerge.Doc<StructureDoc>): string[] {
 export function listAllPathsIncludingDeleted(doc: Automerge.Doc<StructureDoc>): string[] {
   return Object.keys(doc.files);
 }
+
+/**
+ * Returns paths where the entry has `deleted === true`.
+ */
+export function listDeletedPaths(doc: Automerge.Doc<StructureDoc>): string[] {
+  return Object.entries(doc.files)
+    .filter(([_, entry]) => entry.deleted === true)
+    .map(([path]) => path);
+}

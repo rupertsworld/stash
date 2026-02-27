@@ -1,16 +1,13 @@
-import * as crypto from "node:crypto";
-import * as fs from "node:fs/promises";
-import * as path from "node:path";
 import { StashManager } from "../../core/manager.js";
 import { getGitHubToken } from "../../core/config.js";
 import { GitHubProvider, parseGitHubRemote } from "../../providers/github.js";
 import { promptChoice, prompt } from "../prompts.js";
-import type { Stash } from "../../core/stash.js";
 
 interface CreateOptions {
   path?: string;
   description?: string;
   remote?: string;
+  create?: boolean;
 }
 
 export async function createStash(
@@ -21,7 +18,6 @@ export async function createStash(
 
   let provider: GitHubProvider | null = null;
   let remote: string | null = null;
-  let remoteFilesToImport: string[] = [];
 
   if (opts.remote !== undefined) {
     // --remote flag provided, skip prompt
@@ -30,7 +26,11 @@ export async function createStash(
     } else if (opts.remote.startsWith("github:")) {
       const parsed = parseGitHubRemote(opts.remote);
       if (!parsed) {
-        console.error("Invalid remote format. Use github:owner/repo or github:owner/repo/folder");
+        console.error("Invalid remote format. Use github:owner/repo");
+        process.exit(1);
+      }
+      if (parsed.pathPrefix) {
+        console.error("Subfolder paths are not supported. Use github:owner/repo");
         process.exit(1);
       }
 
@@ -40,20 +40,26 @@ export async function createStash(
         process.exit(1);
       }
 
-      provider = new GitHubProvider(token, parsed.owner, parsed.repo, parsed.pathPrefix);
+      provider = new GitHubProvider(token, parsed.owner, parsed.repo);
 
-      // Check remote state using fetch()
       let remoteDocs: Map<string, Uint8Array>;
       try {
         remoteDocs = await provider.fetch();
       } catch (err) {
         const error = err as Error & { status?: number };
         if (error.status === 404) {
-          console.error(`Repository ${parsed.owner}/${parsed.repo} does not exist.`);
-          console.error("Create the repository on GitHub first.");
-          process.exit(1);
+          if (!opts.create) {
+            console.error(`Repository ${parsed.owner}/${parsed.repo} does not exist.`);
+            console.error("Create the repository on GitHub first, or use --create to create it.");
+            process.exit(1);
+          }
+          if (provider.create) {
+            await provider.create();
+          }
+          remoteDocs = new Map();
+        } else {
+          throw err;
         }
-        throw err;
       }
 
       if (remoteDocs.size > 0) {
@@ -62,29 +68,9 @@ export async function createStash(
         process.exit(1);
       }
 
-      // Check for existing files in the repo
-      const existingFiles = await provider.listFiles();
-      if (existingFiles.length > 0) {
-        const choice = await promptChoice(
-          `This repository has ${existingFiles.length} existing file(s).\nConvert to stash and import them?`,
-          ["Yes, import files", "No, abort"]
-        );
-
-        if (choice === "No, abort") {
-          console.log("Aborted. Repository unchanged.");
-          process.exit(0);
-        }
-
-        remoteFilesToImport = existingFiles;
-      }
-
-      // Initialize repo with .stash structure
-      console.log("Initializing repository...");
-      await provider.create();
-
       remote = opts.remote;
     } else {
-      console.error("Unknown remote format. Use 'none' or 'github:owner/repo'");
+      console.error("Unknown remote format. Use 'none' or 'github:owner/repo'.");
       process.exit(1);
     }
   } else {
@@ -103,29 +89,37 @@ export async function createStash(
         process.exit(1);
       }
 
-      const repoInput = await prompt("GitHub repo (owner/repo or owner/repo/folder): ");
+      const repoInput = await prompt("GitHub repo (owner/repo): ");
       const parts = repoInput.split("/");
-      if (parts.length < 2) {
-        console.error("Invalid repo format. Use owner/repo or owner/repo/folder.");
+      if (parts.length !== 2 || !parts[0] || !parts[1]) {
+        console.error("Invalid repo format. Use owner/repo");
         process.exit(1);
       }
 
-      const [owner, repo, ...pathParts] = parts;
-      const pathPrefix = pathParts.join("/");
-      provider = new GitHubProvider(token, owner, repo, pathPrefix);
+      const [owner, repo] = parts;
+      provider = new GitHubProvider(token, owner, repo);
 
-      // Check remote state using fetch()
       let remoteDocs: Map<string, Uint8Array>;
       try {
         remoteDocs = await provider.fetch();
       } catch (err) {
         const error = err as Error & { status?: number };
         if (error.status === 404) {
-          console.error(`Repository ${owner}/${repo} does not exist.`);
-          console.error("Create the repository on GitHub first.");
-          process.exit(1);
+          const createChoice = await promptChoice(
+            `Repository ${owner}/${repo} does not exist. Create it on GitHub?`,
+            ["Yes", "No"],
+          );
+          if (createChoice === "No") {
+            console.log("Aborted.");
+            process.exit(0);
+          }
+          if (provider.create) {
+            await provider.create();
+          }
+          remoteDocs = new Map();
+        } else {
+          throw err;
         }
-        throw err;
       }
 
       if (remoteDocs.size > 0) {
@@ -134,27 +128,7 @@ export async function createStash(
         process.exit(1);
       }
 
-      // Check for existing files in the repo
-      const existingFiles = await provider.listFiles();
-      if (existingFiles.length > 0) {
-        const choice = await promptChoice(
-          `This repository has ${existingFiles.length} existing file(s).\nConvert to stash and import them?`,
-          ["Yes, import files", "No, abort"]
-        );
-
-        if (choice === "No, abort") {
-          console.log("Aborted. Repository unchanged.");
-          process.exit(0);
-        }
-
-        remoteFilesToImport = existingFiles;
-      }
-
-      // Initialize repo with .stash structure
-      console.log("Initializing repository...");
-      await provider.create();
-
-      remote = `github:${repoInput}`;
+      remote = `github:${owner}/${repo}`;
     }
   }
 
@@ -167,19 +141,14 @@ export async function createStash(
       opts.description,
     );
 
-    // Import remote files if any
-    if (provider && remoteFilesToImport.length > 0) {
-      console.log(`Importing ${remoteFilesToImport.length} file(s) from remote...`);
-      await importRemoteFiles(stash, provider, remoteFilesToImport);
-    }
-
     const fileCount = stash.listAllFiles().length;
     if (fileCount > 0) {
       console.log(`Total: ${fileCount} file(s) in stash.`);
     }
 
-    // Sync to push imported files to remote
-    if (provider && fileCount > 0) {
+    // When a remote is configured, always perform initial sync after create.
+    // This guarantees remote initialization even when local file count is zero.
+    if (provider) {
       console.log("Syncing to remote...");
       await stash.sync();
     }
@@ -190,55 +159,4 @@ export async function createStash(
     console.error((err as Error).message);
     process.exit(1);
   }
-}
-
-/**
- * Import files from a remote provider into a stash.
- */
-async function importRemoteFiles(
-  stash: Stash,
-  provider: GitHubProvider,
-  files: string[],
-): Promise<void> {
-  const stashPath = stash.path;
-
-  for (const filePath of files) {
-    const content = await provider.fetchFile(filePath);
-
-    if (isUtf8(content)) {
-      stash.write(filePath, content.toString("utf-8"));
-    } else {
-      // Binary file - store hash and blob
-      const hash = hashBuffer(content);
-      const size = content.length;
-      await storeBinaryBlob(stashPath, hash, content);
-      stash.writeBinary(filePath, hash, size);
-    }
-  }
-
-  await stash.flush();
-}
-
-function isUtf8(buffer: Buffer): boolean {
-  try {
-    const text = buffer.toString("utf-8");
-    return !text.includes("\uFFFD");
-  } catch {
-    return false;
-  }
-}
-
-function hashBuffer(buffer: Buffer): string {
-  return crypto.createHash("sha256").update(buffer).digest("hex");
-}
-
-async function storeBinaryBlob(
-  rootPath: string,
-  hash: string,
-  content: Buffer,
-): Promise<void> {
-  const blobDir = path.join(rootPath, ".stash", "blobs");
-  await fs.mkdir(blobDir, { recursive: true });
-  const blobPath = path.join(blobDir, `${hash}.bin`);
-  await fs.writeFile(blobPath, content);
 }

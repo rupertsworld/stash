@@ -130,8 +130,8 @@ describe("Integration: end-to-end workflows", () => {
       async fetch() {
         return new Map(remoteStore);
       },
-      async push(docs, _files) {
-        for (const [key, data] of docs) {
+      async push(payload) {
+        for (const [key, data] of payload.docs) {
           remoteStore.set(key, data);
         }
       },
