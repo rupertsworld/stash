@@ -25,7 +25,7 @@ The provider is transport-only: it applies writes/deletes from `push(payload)` a
 
 ## GitHub Provider
 
-Remote format: `github:owner/repo` or `github:owner/repo/path`. Uses Octokit. Fetches structure and docs from `.stash/` in the repo; push builds Git tree from `docs` + `files`, creates commit, updates ref.
+Remote format: `github:owner/repo`. Uses Octokit. Fetches structure and docs from `.stash/` in the repo; push builds Git tree from `docs` + `files`, creates commit, updates ref.
 
 **Tree entries**: all file content (text and binary) is pushed via `createBlob`; tree entries use `sha` only, never inline `content`, to avoid "Invalid tree info" errors from the GitHub tree API.
 
@@ -37,4 +37,4 @@ Remote format: `github:owner/repo` or `github:owner/repo/path`. Uses Octokit. Fe
 
 **changedPaths empty**: When `changedPaths` is omitted or empty (e.g. first sync), push all paths. When non-empty, push only those paths (incremental).
 
-Implements `create()`: creates the repo if it doesn't exist (idempotent); first push then creates `.stash/` content (no .gitkeep). delete removes repo or only the path prefix. Public helpers include single-file fetch; tree walking for push/delete is internal to the provider. Implementation detail: `providers/github.ts`.
+Implements `create()`: creates the repo if it doesn't exist (idempotent); first push then creates `.stash/` content (no .gitkeep). delete removes repo. Public helpers include single-file fetch; tree walking for push/delete is internal to the provider. Implementation detail: `providers/github.ts`.

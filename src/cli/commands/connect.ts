@@ -15,7 +15,11 @@ export async function connectStash(
 
   const parsed = parseGitHubRemote(remote);
   if (!parsed) {
-    console.error("Invalid remote format. Expected: github:owner/repo or github:owner/repo/folder");
+    console.error("Invalid remote format. Use github:owner/repo");
+    process.exit(1);
+  }
+  if (parsed.pathPrefix) {
+    console.error("Subfolder paths are not supported. Use github:owner/repo");
     process.exit(1);
   }
 
@@ -25,7 +29,7 @@ export async function connectStash(
     process.exit(1);
   }
 
-  const provider = new GitHubProvider(token, parsed.owner, parsed.repo, parsed.pathPrefix);
+  const provider = new GitHubProvider(token, parsed.owner, parsed.repo);
 
   try {
     await manager.connect(remote, opts.name, provider, opts.path);

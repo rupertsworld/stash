@@ -26,7 +26,11 @@ export async function createStash(
     } else if (opts.remote.startsWith("github:")) {
       const parsed = parseGitHubRemote(opts.remote);
       if (!parsed) {
-        console.error("Invalid remote format. Use github:owner/repo or github:owner/repo/folder");
+        console.error("Invalid remote format. Use github:owner/repo");
+        process.exit(1);
+      }
+      if (parsed.pathPrefix) {
+        console.error("Subfolder paths are not supported. Use github:owner/repo");
         process.exit(1);
       }
 
@@ -36,7 +40,7 @@ export async function createStash(
         process.exit(1);
       }
 
-      provider = new GitHubProvider(token, parsed.owner, parsed.repo, parsed.pathPrefix);
+      provider = new GitHubProvider(token, parsed.owner, parsed.repo);
 
       let remoteDocs: Map<string, Uint8Array>;
       try {
@@ -66,7 +70,7 @@ export async function createStash(
 
       remote = opts.remote;
     } else {
-      console.error("Unknown remote format. Use 'none' or 'github:owner/repo'");
+      console.error("Unknown remote format. Use 'none' or 'github:owner/repo'.");
       process.exit(1);
     }
   } else {
@@ -85,16 +89,15 @@ export async function createStash(
         process.exit(1);
       }
 
-      const repoInput = await prompt("GitHub repo (owner/repo or owner/repo/folder): ");
+      const repoInput = await prompt("GitHub repo (owner/repo): ");
       const parts = repoInput.split("/");
-      if (parts.length < 2) {
-        console.error("Invalid repo format. Use owner/repo or owner/repo/folder.");
+      if (parts.length !== 2 || !parts[0] || !parts[1]) {
+        console.error("Invalid repo format. Use owner/repo");
         process.exit(1);
       }
 
-      const [owner, repo, ...pathParts] = parts;
-      const pathPrefix = pathParts.join("/");
-      provider = new GitHubProvider(token, owner, repo, pathPrefix);
+      const [owner, repo] = parts;
+      provider = new GitHubProvider(token, owner, repo);
 
       let remoteDocs: Map<string, Uint8Array>;
       try {
@@ -125,7 +128,7 @@ export async function createStash(
         process.exit(1);
       }
 
-      remote = `github:${repoInput}`;
+      remote = `github:${owner}/${repo}`;
     }
   }
 
