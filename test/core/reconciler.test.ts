@@ -7,7 +7,7 @@ import { StashReconciler } from "../../src/core/reconciler.js";
 
 const TEST_ACTOR_ID = "test-actor-id";
 
-async function settle(ms = 1200): Promise<void> {
+async function settle(ms = 800): Promise<void> {
   await new Promise((r) => setTimeout(r, ms));
 }
 
@@ -287,7 +287,7 @@ describe("StashReconciler", { timeout: 15000 }, () => {
       await fs.unlink(path.join(tmpDir, "old.md"));
       // Create with same basename within the 500ms rename window
       await fs.writeFile(path.join(tmpDir, "sub", "old.md"), "rename me");
-      await settle(1800);
+      await settle(1200);
 
       expect(() => stash.read("old.md")).toThrow("File not found");
       expect(stash.read("sub/old.md")).toBe("rename me");

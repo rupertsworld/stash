@@ -59,7 +59,7 @@ async function waitFor(
   predicate: () => boolean,
   opts: { timeout?: number; interval?: number } = {},
 ): Promise<void> {
-  const { timeout = 8000, interval = 50 } = opts;
+  const { timeout = 5000, interval = 50 } = opts;
   const start = Date.now();
   while (!predicate()) {
     if (Date.now() - start > timeout) {
