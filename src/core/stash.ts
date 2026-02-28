@@ -23,13 +23,19 @@ import {
   type FileDoc,
   type BinaryFileDoc,
 } from "./file.js";
-import type { SyncProvider } from "../providers/types.js";
+import type { SyncProvider, SyncState } from "../providers/types.js";
 import { withRetry } from "./errors.js";
 
 interface SyncSnapshot {
   structure: string[];
   docs: Record<string, string[]>;
   files: Record<string, string>;
+}
+
+interface PersistedSyncState {
+  lastHeadSha: string | null;
+  blobShas: Record<string, string>;
+  lastPushedSnapshot: SyncSnapshot | null;
 }
 
 export interface StashMeta {
@@ -54,6 +60,7 @@ export class Stash {
   private static SYNC_DEBOUNCE_MS = 2000;
   // Known paths: tracks files we've seen locally (for distinguishing new vs deleted)
   private knownPaths: Set<string> = new Set();
+  private lastPushedSnapshot: SyncSnapshot | null;
 
   constructor(
     name: string,
@@ -63,6 +70,7 @@ export class Stash {
     meta: StashMeta,
     actorId: string,
     provider: SyncProvider | null = null,
+    lastPushedSnapshot: SyncSnapshot | null = null,
   ) {
     this.name = name;
     this.path = stashPath;
@@ -71,6 +79,7 @@ export class Stash {
     this.meta = meta;
     this.actorId = actorId;
     this.provider = provider;
+    this.lastPushedSnapshot = lastPushedSnapshot;
   }
 
   private getHexActorId(): string {
@@ -146,7 +155,30 @@ export class Stash {
       // docs dir might not exist yet
     }
 
-    const stash = new Stash(name, stashPath, structureDoc, fileDocs, meta, actorId, provider);
+    let lastPushedSnapshot: SyncSnapshot | null = null;
+    try {
+      const syncStateData = await fs.readFile(
+        path.join(stashDir, "sync-state.json"),
+        "utf-8",
+      );
+      const parsed = JSON.parse(syncStateData) as Partial<PersistedSyncState>;
+      if (parsed.lastPushedSnapshot) {
+        lastPushedSnapshot = parsed.lastPushedSnapshot;
+      }
+    } catch {
+      // sync state might not exist yet
+    }
+
+    const stash = new Stash(
+      name,
+      stashPath,
+      structureDoc,
+      fileDocs,
+      meta,
+      actorId,
+      provider,
+      lastPushedSnapshot,
+    );
     await stash.loadKnownPaths();
     return stash;
   }
@@ -354,61 +386,73 @@ export class Stash {
       }
     }
 
-    const beforeMerge = this.buildSyncSnapshot();
-    const remoteDocs = await withRetry(() => this.provider!.fetch());
-    const merged = this.mergeWithRemote(remoteDocs);
+    const localSnapshot = this.buildSyncSnapshot();
+    const hasLocalChanges =
+      !this.lastPushedSnapshot ||
+      !this.snapshotsEqual(localSnapshot, this.lastPushedSnapshot);
 
-    if (remoteDocs.size === 0) {
-      // First sync or empty remote: always push
-    } else {
-      const remoteSnapshot = this.buildSnapshotFromDocs(remoteDocs);
-      const mergedSnapshot = this.buildSyncSnapshot();
-      if (this.snapshotsEqual(remoteSnapshot, mergedSnapshot)) {
-        await this.save();
-        return;
-      }
+    const result = await withRetry(() => this.provider!.fetch());
+
+    // Case 1: no remote changes and no local changes.
+    if (result.unchanged && !hasLocalChanges) {
+      return;
     }
 
-    const changedPaths = this.computeChangedPaths(beforeMerge, this.buildSyncSnapshot());
+    // Case 2: remote unchanged, local changed.
+    if (result.unchanged) {
+      await this.pushCurrentState(localSnapshot);
+      return;
+    }
+
+    // Case 3: remote empty (or no docs yet) - push local state.
+    if (result.docs.size === 0) {
+      await this.pushCurrentState(localSnapshot);
+      return;
+    }
+
+    // Case 4: remote changed - merge first.
+    this.mergeWithRemote(result.docs);
+
+    // Case 4a: remote changed, no local changes. Save merged state, no push.
+    if (!hasLocalChanges) {
+      this.lastPushedSnapshot = this.buildSyncSnapshot();
+      await this.save();
+      return;
+    }
+
+    // Case 4b: both changed - push merged state.
+    await this.pushCurrentState(localSnapshot);
+  }
+
+  private async pushCurrentState(beforeSnapshot: SyncSnapshot): Promise<void> {
+    const docs = this.buildMergedDocsForPush();
+    const changedPaths = this.computeChangedPaths(
+      beforeSnapshot,
+      this.buildSyncSnapshot(),
+    );
     const pathsToDelete = listDeletedPaths(this.structureDoc);
     const files = await this.buildFilesMap();
 
     await withRetry(() =>
       this.provider!.push({
-        docs: merged,
+        docs,
         files,
         changedPaths,
         pathsToDelete,
       }),
     );
 
+    this.lastPushedSnapshot = this.buildSyncSnapshot();
     await this.save();
   }
 
-  private buildSnapshotFromDocs(docs: Map<string, Uint8Array>): SyncSnapshot {
-    const structureData = docs.get("structure");
-    if (!structureData) {
-      return { structure: [], docs: {}, files: {} };
+  private buildMergedDocsForPush(): Map<string, Uint8Array> {
+    const docs = new Map<string, Uint8Array>();
+    docs.set("structure", Automerge.save(this.structureDoc));
+    for (const [docId, doc] of this.fileDocs) {
+      docs.set(docId, Automerge.save(doc));
     }
-    const structureDoc = Automerge.load<StructureDoc>(structureData);
-    const structure = Automerge.getHeads(structureDoc);
-    const docEntries: Record<string, string[]> = {};
-    const fileEntries: Record<string, string> = {};
-    for (const [docId, data] of docs) {
-      if (docId === "structure") continue;
-      const doc = Automerge.load<FileDoc>(data);
-      docEntries[docId] = Automerge.getHeads(doc);
-    }
-    for (const filePath of listPaths(structureDoc)) {
-      const entry = getEntry(structureDoc, filePath);
-      if (!entry) continue;
-      const data = docs.get(entry.docId);
-      if (!data) continue;
-      const doc = Automerge.load<FileDoc>(data);
-      fileEntries[filePath] =
-        doc.type === "binary" ? doc.hash : Automerge.getHeads(doc).join(",");
-    }
-    return { structure, docs: docEntries, files: fileEntries };
+    return docs;
   }
 
   private buildSyncSnapshot(): SyncSnapshot {
@@ -496,9 +540,7 @@ export class Stash {
    * Merge remote docs into local state.
    * Handles the "fresh join" case where local has no shared history with remote.
    */
-  private mergeWithRemote(remoteDocs: Map<string, Uint8Array>): Map<string, Uint8Array> {
-    const merged = new Map<string, Uint8Array>();
-
+  private mergeWithRemote(remoteDocs: Map<string, Uint8Array>): void {
     // Check if this is a "fresh join" - local structure has no files
     const localIsEmpty = Object.keys(this.structureDoc.files).length === 0;
     const remoteStructureData = remoteDocs.get("structure");
@@ -506,7 +548,6 @@ export class Stash {
     if (localIsEmpty && remoteStructureData) {
       // Fresh join: adopt remote state entirely
       this.structureDoc = Automerge.load<StructureDoc>(remoteStructureData);
-      merged.set("structure", remoteStructureData);
 
       // Load all remote file docs and mark paths as known
       const referencedDocIds = new Set(
@@ -516,7 +557,6 @@ export class Stash {
       for (const [docId, data] of remoteDocs) {
         if (docId !== "structure" && referencedDocIds.has(docId)) {
           this.fileDocs.set(docId, Automerge.load<FileDoc>(data));
-          merged.set(docId, data);
         }
       }
 
@@ -559,8 +599,6 @@ export class Stash {
         this.structureDoc = result.doc;
       }
 
-      merged.set("structure", Automerge.save(this.structureDoc));
-
       // Get all referenced doc IDs from merged structure
       const referencedDocIds = new Set(
         Object.values(this.structureDoc.files).map((f) => f.docId),
@@ -576,14 +614,11 @@ export class Stash {
           const remoteDoc = Automerge.load<FileDoc>(remoteData);
           const mergedDoc = Automerge.merge(localDoc, remoteDoc);
           this.fileDocs.set(docId, mergedDoc);
-          merged.set(docId, Automerge.save(mergedDoc));
         } else if (localDoc) {
           // Local only
-          merged.set(docId, Automerge.save(localDoc));
         } else if (remoteData) {
           // Remote only
           this.fileDocs.set(docId, Automerge.load<FileDoc>(remoteData));
-          merged.set(docId, remoteData);
         }
       }
 
@@ -602,10 +637,7 @@ export class Stash {
       // Content wins: if local made changes to a file that remote deleted,
       // clear the tombstone (local content wins)
       this.applyContentWinsRule(remoteDocs);
-      merged.set("structure", Automerge.save(this.structureDoc));
     }
-
-    return merged;
   }
 
   /**
@@ -679,6 +711,16 @@ export class Stash {
     );
   }
 
+  private buildPersistedSyncState(): PersistedSyncState {
+    const providerState: SyncState | undefined =
+      this.provider?.getSyncState?.();
+    return {
+      lastHeadSha: providerState?.lastHeadSha ?? null,
+      blobShas: providerState?.blobShas ?? {},
+      lastPushedSnapshot: this.lastPushedSnapshot,
+    };
+  }
+
   // --- Persistence ---
   async save(): Promise<void> {
     const stashDir = path.join(this.path, ".stash");
@@ -701,6 +743,11 @@ export class Stash {
         Automerge.save(doc),
       );
     }
+
+    await atomicWrite(
+      path.join(stashDir, "sync-state.json"),
+      JSON.stringify(this.buildPersistedSyncState(), null, 2) + "\n",
+    );
 
     await this.saveKnownPaths();
   }

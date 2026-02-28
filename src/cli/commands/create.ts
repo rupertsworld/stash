@@ -1,6 +1,7 @@
 import { StashManager } from "../../core/manager.js";
 import { getGitHubToken } from "../../core/config.js";
 import { GitHubProvider, parseGitHubRemote } from "../../providers/github.js";
+import type { FetchResult } from "../../providers/types.js";
 import { promptChoice, prompt } from "../prompts.js";
 
 interface CreateOptions {
@@ -42,9 +43,9 @@ export async function createStash(
 
       provider = new GitHubProvider(token, parsed.owner, parsed.repo);
 
-      let remoteDocs: Map<string, Uint8Array>;
+      let remoteFetch: FetchResult;
       try {
-        remoteDocs = await provider.fetch();
+        remoteFetch = await provider.fetch();
       } catch (err) {
         const error = err as Error & { status?: number };
         if (error.status === 404) {
@@ -56,13 +57,13 @@ export async function createStash(
           if (provider.create) {
             await provider.create();
           }
-          remoteDocs = new Map();
+          remoteFetch = { docs: new Map(), unchanged: false };
         } else {
           throw err;
         }
       }
 
-      if (remoteDocs.size > 0) {
+      if (remoteFetch.docs.size > 0) {
         console.error(`Repository ${parsed.owner}/${parsed.repo} already has stash data.`);
         console.error("Use 'stash connect' to join an existing stash.");
         process.exit(1);
@@ -99,9 +100,9 @@ export async function createStash(
       const [owner, repo] = parts;
       provider = new GitHubProvider(token, owner, repo);
 
-      let remoteDocs: Map<string, Uint8Array>;
+      let remoteFetch: FetchResult;
       try {
-        remoteDocs = await provider.fetch();
+        remoteFetch = await provider.fetch();
       } catch (err) {
         const error = err as Error & { status?: number };
         if (error.status === 404) {
@@ -116,13 +117,13 @@ export async function createStash(
           if (provider.create) {
             await provider.create();
           }
-          remoteDocs = new Map();
+          remoteFetch = { docs: new Map(), unchanged: false };
         } else {
           throw err;
         }
       }
 
-      if (remoteDocs.size > 0) {
+      if (remoteFetch.docs.size > 0) {
         console.error(`Repository ${owner}/${repo} already has stash data.`);
         console.error("Use 'stash connect' to join an existing stash.");
         process.exit(1);
