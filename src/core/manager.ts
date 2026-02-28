@@ -11,7 +11,7 @@ import {
   unregisterStash,
   type GlobalConfig,
 } from "./config.js";
-import type { SyncProvider } from "../providers/types.js";
+import type { SyncProvider, SyncState } from "../providers/types.js";
 import { GitHubProvider, parseGitHubRemote } from "../providers/github.js";
 
 // Valid stash name: starts with letter/number, contains only alphanumeric, dots, hyphens, underscores
@@ -29,6 +29,35 @@ function validateStashName(name: string): void {
       "Stash name must start with a letter or number and contain only " +
       "letters, numbers, dots, hyphens, or underscores"
     );
+  }
+}
+
+async function readProviderSyncState(
+  stashPath: string,
+): Promise<SyncState | undefined> {
+  try {
+    const data = await fs.readFile(
+      path.join(stashPath, ".stash", "sync-state.json"),
+      "utf-8",
+    );
+    const parsed = JSON.parse(data) as {
+      lastHeadSha?: unknown;
+      blobShas?: unknown;
+    };
+    const blobShasRaw =
+      parsed.blobShas && typeof parsed.blobShas === "object"
+        ? (parsed.blobShas as Record<string, unknown>)
+        : {};
+    const blobShas = Object.fromEntries(
+      Object.entries(blobShasRaw).filter(([, value]) => typeof value === "string"),
+    ) as Record<string, string>;
+    return {
+      lastHeadSha:
+        typeof parsed.lastHeadSha === "string" ? parsed.lastHeadSha : null,
+      blobShas,
+    };
+  } catch {
+    return undefined;
   }
 }
 
@@ -73,7 +102,15 @@ export class StashManager {
             if (parsed) {
               const token = await getGitHubToken(baseDir);
               if (token) {
-                provider = new GitHubProvider(token, parsed.owner, parsed.repo, parsed.pathPrefix);
+                const syncState = await readProviderSyncState(stashPath);
+                provider = new GitHubProvider(
+                  token,
+                  parsed.owner,
+                  parsed.repo,
+                  parsed.pathPrefix,
+                  "main",
+                  syncState,
+                );
               }
             }
           }

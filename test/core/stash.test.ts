@@ -4,7 +4,7 @@ import * as path from "node:path";
 import * as os from "node:os";
 import * as Automerge from "@automerge/automerge";
 import { Stash } from "../../src/core/stash.js";
-import type { SyncProvider } from "../../src/providers/types.js";
+import type { SyncProvider, FetchResult } from "../../src/providers/types.js";
 
 const TEST_ACTOR_ID = "test-actor-id";
 
@@ -147,8 +147,8 @@ describe("Stash", () => {
   it("should sync with a provider", async () => {
     let stored = new Map<string, Uint8Array>();
     const mockProvider: SyncProvider = {
-      async fetch() {
-        return new Map(stored);
+      async fetch(): Promise<FetchResult> {
+        return { docs: new Map(stored), unchanged: false };
       },
       async push(payload) {
         stored = new Map(payload.docs);
@@ -173,16 +173,16 @@ describe("Stash", () => {
 
   it("builds push payload with docs and files", async () => {
     let capturedPayload: any = null;
-    const mockProvider = {
-      async fetch() {
-        return new Map<string, Uint8Array>();
+    const mockProvider: SyncProvider = {
+      async fetch(): Promise<FetchResult> {
+        return { docs: new Map<string, Uint8Array>(), unchanged: false };
       },
       async push(payload: unknown) {
         capturedPayload = payload;
       },
       async create() {},
       async delete() {},
-    } as unknown as SyncProvider;
+    };
 
     const stash = Stash.create(
       "test",
@@ -211,8 +211,8 @@ describe("Stash", () => {
 
     let stored = new Map<string, Uint8Array>();
     const mockProvider: SyncProvider = {
-      async fetch() {
-        return new Map(stored);
+      async fetch(): Promise<FetchResult> {
+        return { docs: new Map(stored), unchanged: false };
       },
       async push(payload) {
         stored = new Map(payload.docs);
@@ -241,8 +241,8 @@ describe("Stash", () => {
     let stored = new Map<string, Uint8Array>();
     let pushCount = 0;
     const mockProvider: SyncProvider = {
-      async fetch() {
-        return new Map(stored);
+      async fetch(): Promise<FetchResult> {
+        return { docs: new Map(stored), unchanged: false };
       },
       async push(payload) {
         stored = new Map(payload.docs);
@@ -353,9 +353,9 @@ describe("Stash", () => {
     it("should schedule sync after mutation", async () => {
       let syncCalled = false;
       const mockProvider: SyncProvider = {
-        async fetch() {
+        async fetch(): Promise<FetchResult> {
           syncCalled = true;
-          return new Map();
+          return { docs: new Map(), unchanged: false };
         },
         async push() {},
         async create() {},
@@ -386,9 +386,9 @@ describe("Stash", () => {
       });
 
       const mockProvider: SyncProvider = {
-        async fetch() {
+        async fetch(): Promise<FetchResult> {
           await fetchPromise;
-          return new Map();
+          return { docs: new Map(), unchanged: false };
         },
         async push() {},
         async create() {},
@@ -426,10 +426,10 @@ describe("Stash", () => {
       });
 
       const mockProvider: SyncProvider = {
-        async fetch() {
+        async fetch(): Promise<FetchResult> {
           syncCount++;
           await fetchPromise;
-          return new Map();
+          return { docs: new Map(), unchanged: false };
         },
         async push() {},
         async create() {},

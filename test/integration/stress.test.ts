@@ -5,7 +5,7 @@ import * as os from "node:os";
 import { Stash } from "../../src/core/stash.js";
 import { StashReconciler } from "../../src/core/reconciler.js";
 import { StashManager } from "../../src/core/manager.js";
-import type { SyncProvider } from "../../src/providers/types.js";
+import type { SyncProvider, FetchResult } from "../../src/providers/types.js";
 
 const TEST_ACTOR_ID = "stress-test-actor";
 
@@ -127,8 +127,8 @@ describe("Integration: end-to-end workflows", () => {
     const remoteStore = new Map<string, Uint8Array>();
 
     const mockProvider: SyncProvider = {
-      async fetch() {
-        return new Map(remoteStore);
+      async fetch(): Promise<FetchResult> {
+        return { docs: new Map(remoteStore), unchanged: false };
       },
       async push(payload) {
         for (const [key, data] of payload.docs) {

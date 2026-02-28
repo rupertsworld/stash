@@ -3,7 +3,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import * as os from "node:os";
 import { StashManager } from "../../src/core/manager.js";
-import type { SyncProvider } from "../../src/providers/types.js";
+import type { SyncProvider, FetchResult } from "../../src/providers/types.js";
 import * as config from "../../src/core/config.js";
 
 describe("StashManager", () => {
@@ -81,8 +81,8 @@ describe("StashManager", () => {
   it("should delete locally when provider has no delete()", async () => {
     const manager = await StashManager.load(tmpDir);
     const provider: SyncProvider = {
-      async fetch() {
-        return new Map();
+      async fetch(): Promise<FetchResult> {
+        return { docs: new Map(), unchanged: false };
       },
       async push() {},
     };
@@ -96,8 +96,8 @@ describe("StashManager", () => {
     const deleteSpy = vi.fn().mockResolvedValue(undefined);
     const manager = await StashManager.load(tmpDir);
     const provider: SyncProvider = {
-      async fetch() {
-        return new Map();
+      async fetch(): Promise<FetchResult> {
+        return { docs: new Map(), unchanged: false };
       },
       async push() {},
       delete: deleteSpy,
@@ -148,9 +148,9 @@ describe("StashManager", () => {
   it("should sync all stashes", async () => {
     const syncCalls: string[] = [];
     const mockProvider: SyncProvider = {
-      async fetch() {
+      async fetch(): Promise<FetchResult> {
         syncCalls.push("synced");
-        return new Map();
+        return { docs: new Map(), unchanged: false };
       },
       async push() {},
       async create() {},
@@ -184,8 +184,8 @@ describe("StashManager", () => {
 
     const manager1 = await StashManager.load(tmpDir);
     const mockProvider: SyncProvider = {
-      async fetch() {
-        return new Map();
+      async fetch(): Promise<FetchResult> {
+        return { docs: new Map(), unchanged: false };
       },
       async push() {},
       async create() {},

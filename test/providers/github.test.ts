@@ -5,6 +5,7 @@ import { SyncError } from "../../src/core/errors.js";
 import { createStructureDoc, addFile } from "../../src/core/structure.js";
 import { createFileDoc, type FileDoc } from "../../src/core/file.js";
 import type { StructureDoc } from "../../src/core/structure.js";
+import type { SyncState } from "../../src/providers/types.js";
 
 // Mock Octokit
 vi.mock("octokit", () => {
@@ -298,63 +299,57 @@ describe("GitHubProvider", () => {
     remoteStructure = r1.doc;
     const remoteFile = createFileDoc("Remote content");
 
-    const remoteStructureBase64 = Buffer.from(
-      Automerge.save(remoteStructure),
-    ).toString("base64");
-    const remoteFileBase64 = Buffer.from(Automerge.save(remoteFile)).toString(
-      "base64",
-    );
+    const structureBlob = Automerge.save(remoteStructure);
+    const fileBlob = Automerge.save(remoteFile);
 
-    // Mock fetch
-    mockOctokit.rest.repos.getContent.mockImplementation(
-      async ({ path }: { path: string }) => {
-        if (path === ".stash/structure.automerge") {
-          return { data: { content: remoteStructureBase64 } };
-        }
-        if (path === ".stash/docs") {
-          return {
-            data: [{ name: `${r1.docId}.automerge` }],
-          };
-        }
-        if (path === `.stash/docs/${r1.docId}.automerge`) {
-          return { data: { content: remoteFileBase64 } };
-        }
-        throw Object.assign(new Error("Not Found"), { status: 404 });
+    // Mock fetch via tree-based approach
+    mockOctokit.rest.git.getRef = vi.fn().mockResolvedValue({
+      data: { object: { sha: "head-sha-1" } },
+    });
+    mockOctokit.rest.git.getCommit = vi.fn().mockResolvedValue({
+      data: { tree: { sha: "tree-sha-1" } },
+    });
+    mockOctokit.rest.git.getTree = vi.fn().mockResolvedValue({
+      data: {
+        tree: [
+          { path: ".stash/structure.automerge", type: "blob", sha: "blob-structure" },
+          { path: `.stash/docs/${r1.docId}.automerge`, type: "blob", sha: "blob-file1" },
+        ],
       },
-    );
+    });
+    mockOctokit.rest.git.getBlob = vi.fn()
+      .mockResolvedValueOnce({
+        data: { content: Buffer.from(structureBlob).toString("base64") },
+      })
+      .mockResolvedValueOnce({
+        data: { content: Buffer.from(fileBlob).toString("base64") },
+      });
 
     const result = await provider.fetch();
 
     // Should have structure + remote file
-    expect(result.has("structure")).toBe(true);
-    expect(result.has(r1.docId)).toBe(true);
-    expect(result.size).toBe(2);
+    expect(result.docs.has("structure")).toBe(true);
+    expect(result.docs.has(r1.docId)).toBe(true);
+    expect(result.docs.size).toBe(2);
+    expect(result.unchanged).toBe(false);
   });
 
   it("should throw error on auth failure during fetch", async () => {
-    mockOctokit.rest.repos.getContent.mockRejectedValue(
+    mockOctokit.rest.git.getRef = vi.fn().mockRejectedValue(
       Object.assign(new Error("Unauthorized"), { status: 401 }),
     );
 
     await expect(provider.fetch()).rejects.toThrow();
   });
 
-  it("should throw 404 from fetch when repo is missing", async () => {
-    mockOctokit.rest.repos.get = vi.fn().mockRejectedValue(
-      Object.assign(new Error("Not Found"), { status: 404 }),
-    );
-
-    await expect(provider.fetch()).rejects.toMatchObject({ status: 404 });
-  });
-
-  it("should return empty docs when repo exists but .stash is missing", async () => {
-    mockOctokit.rest.repos.get = vi.fn().mockResolvedValue({ data: {} });
-    mockOctokit.rest.repos.getContent.mockRejectedValue(
+  it("should return empty docs for empty repo (getRef 404)", async () => {
+    mockOctokit.rest.git.getRef = vi.fn().mockRejectedValue(
       Object.assign(new Error("Not Found"), { status: 404 }),
     );
 
     const result = await provider.fetch();
-    expect(result.size).toBe(0);
+    expect(result.docs.size).toBe(0);
+    expect(result.unchanged).toBe(false);
   });
 
   it("should create user-owned repo when missing", async () => {
@@ -427,7 +422,7 @@ describe("GitHubProvider", () => {
   });
 
   it("should throw error on server failure during fetch", async () => {
-    mockOctokit.rest.repos.getContent.mockRejectedValue(
+    mockOctokit.rest.git.getRef = vi.fn().mockRejectedValue(
       Object.assign(new Error("Server Error"), { status: 500 }),
     );
 
@@ -575,17 +570,15 @@ describe("GitHubProvider", () => {
     });
 
     it("should prefix .stash paths when fetching", async () => {
-      // Mock fetch - return 404 for all paths (empty stash)
-      mockOctokit.rest.repos.getContent.mockRejectedValue(
+      // Mock fetch - return 404 (empty repo)
+      mockOctokit.rest.git.getRef = vi.fn().mockRejectedValue(
         Object.assign(new Error("Not Found"), { status: 404 }),
       );
 
-      await prefixedProvider.fetch();
+      const result = await prefixedProvider.fetch();
 
-      // Check that getContent was called with prefixed paths
-      const calls = mockOctokit.rest.repos.getContent.mock.calls;
-      const paths = calls.map((c: any) => c[0].path);
-      expect(paths).toContain("notes/.stash/structure.automerge");
+      expect(result.docs.size).toBe(0);
+      expect(result.unchanged).toBe(false);
     });
 
     it("should prefix all paths when pushing", async () => {
@@ -690,6 +683,12 @@ describe("GitHubProvider", () => {
       const prefixMock = (Octokit as any).mock.results[
         (Octokit as any).mock.results.length - 1
       ].value;
+      prefixMock.rest.repos.listBranches = vi.fn().mockResolvedValue({
+        data: [{ name: "main" }],
+      });
+      prefixMock.rest.repos.get = vi.fn().mockResolvedValue({
+        data: { default_branch: "main" },
+      });
 
       // Mock listing files via tree API (includes .stash/ when includeInternal=true)
       prefixMock.rest.git.getTree.mockResolvedValue({
@@ -804,6 +803,375 @@ describe("fetchFile", () => {
     );
 
     await expect(provider.fetchFile("nonexistent.md")).rejects.toThrow();
+  });
+});
+
+describe("incremental fetch", () => {
+  let provider: GitHubProvider;
+  let mockOctokit: any;
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    provider = new GitHubProvider("test-token", "owner", "repo");
+    const { Octokit } = await import("octokit");
+    mockOctokit = (Octokit as any).mock.results[
+      (Octokit as any).mock.results.length - 1
+    ].value;
+    mockOctokit.rest.repos.get = vi.fn().mockResolvedValue({
+      data: { default_branch: "main" },
+    });
+    mockOctokit.rest.repos.listBranches = vi.fn().mockResolvedValue({
+      data: [{ name: "main" }],
+    });
+  });
+
+  it("fetch returns FetchResult with unchanged: false and all docs on first call", async () => {
+    // Create test docs
+    let structure = createStructureDoc();
+    const r1 = addFile(structure, "hello.md");
+    structure = r1.doc;
+    const fileDoc = createFileDoc("Hello!");
+
+    const structureBlob = Automerge.save(structure);
+    const fileBlob = Automerge.save(fileDoc);
+
+    mockOctokit.rest.git.getRef = vi.fn().mockResolvedValue({
+      data: { object: { sha: "head-sha-1" } },
+    });
+    mockOctokit.rest.git.getCommit = vi.fn().mockResolvedValue({
+      data: { tree: { sha: "tree-sha-1" } },
+    });
+    mockOctokit.rest.git.getTree = vi.fn().mockResolvedValue({
+      data: {
+        tree: [
+          { path: ".stash/structure.automerge", type: "blob", sha: "blob-structure" },
+          { path: `.stash/docs/${r1.docId}.automerge`, type: "blob", sha: "blob-file1" },
+        ],
+      },
+    });
+    mockOctokit.rest.git.getBlob = vi.fn()
+      .mockResolvedValueOnce({
+        data: { content: Buffer.from(structureBlob).toString("base64") },
+      })
+      .mockResolvedValueOnce({
+        data: { content: Buffer.from(fileBlob).toString("base64") },
+      });
+
+    const result = await provider.fetch();
+
+    expect(result.unchanged).toBe(false);
+    expect(result.docs.has("structure")).toBe(true);
+    expect(result.docs.has(r1.docId)).toBe(true);
+    expect(result.docs.size).toBe(2);
+  });
+
+  it("fetch returns unchanged: true when HEAD SHA matches cached SHA", async () => {
+    // First fetch to populate cache
+    mockOctokit.rest.git.getRef = vi.fn().mockResolvedValue({
+      data: { object: { sha: "head-sha-1" } },
+    });
+    mockOctokit.rest.git.getCommit = vi.fn().mockResolvedValue({
+      data: { tree: { sha: "tree-sha-1" } },
+    });
+    mockOctokit.rest.git.getTree = vi.fn().mockResolvedValue({
+      data: { tree: [] },
+    });
+
+    await provider.fetch();
+
+    // Second fetch — same SHA
+    vi.clearAllMocks();
+    mockOctokit.rest.git.getRef = vi.fn().mockResolvedValue({
+      data: { object: { sha: "head-sha-1" } },
+    });
+
+    const result = await provider.fetch();
+
+    expect(result.unchanged).toBe(true);
+    expect(result.docs.size).toBe(0);
+    // Should NOT call getCommit or getTree
+    expect(mockOctokit.rest.git.getCommit).not.toHaveBeenCalled();
+    expect(mockOctokit.rest.git.getTree).not.toHaveBeenCalled();
+  });
+
+  it("fetch returns only changed docs when HEAD differs and some blobs match", async () => {
+    const structure = createStructureDoc();
+    const structureBlob = Automerge.save(structure);
+    const fileBlob = Automerge.save(createFileDoc("content"));
+
+    // First fetch — populate cache with 2 blobs
+    mockOctokit.rest.git.getRef = vi.fn().mockResolvedValue({
+      data: { object: { sha: "head-sha-1" } },
+    });
+    mockOctokit.rest.git.getCommit = vi.fn().mockResolvedValue({
+      data: { tree: { sha: "tree-sha-1" } },
+    });
+    mockOctokit.rest.git.getTree = vi.fn().mockResolvedValue({
+      data: {
+        tree: [
+          { path: ".stash/structure.automerge", type: "blob", sha: "blob-structure-v1" },
+          { path: ".stash/docs/doc1.automerge", type: "blob", sha: "blob-doc1-v1" },
+        ],
+      },
+    });
+    mockOctokit.rest.git.getBlob = vi.fn()
+      .mockResolvedValueOnce({ data: { content: Buffer.from(structureBlob).toString("base64") } })
+      .mockResolvedValueOnce({ data: { content: Buffer.from(fileBlob).toString("base64") } });
+
+    await provider.fetch();
+
+    // Second fetch — HEAD changed, only structure blob changed
+    vi.clearAllMocks();
+    mockOctokit.rest.git.getRef = vi.fn().mockResolvedValue({
+      data: { object: { sha: "head-sha-2" } },
+    });
+    mockOctokit.rest.git.getCommit = vi.fn().mockResolvedValue({
+      data: { tree: { sha: "tree-sha-2" } },
+    });
+    mockOctokit.rest.git.getTree = vi.fn().mockResolvedValue({
+      data: {
+        tree: [
+          { path: ".stash/structure.automerge", type: "blob", sha: "blob-structure-v2" }, // changed
+          { path: ".stash/docs/doc1.automerge", type: "blob", sha: "blob-doc1-v1" }, // same
+        ],
+      },
+    });
+    mockOctokit.rest.git.getBlob = vi.fn().mockResolvedValueOnce({
+      data: { content: Buffer.from(structureBlob).toString("base64") },
+    });
+
+    const result = await provider.fetch();
+
+    expect(result.unchanged).toBe(false);
+    expect(result.docs.has("structure")).toBe(true);
+    expect(result.docs.has("doc1")).toBe(false); // unchanged blob not fetched
+    expect(mockOctokit.rest.git.getBlob).toHaveBeenCalledTimes(1); // only changed blob
+  });
+
+  it("fetch returns unchanged: false with empty docs for empty repo (404)", async () => {
+    mockOctokit.rest.git.getRef = vi.fn().mockRejectedValue(
+      Object.assign(new Error("Not Found"), { status: 404 }),
+    );
+
+    const result = await provider.fetch();
+
+    expect(result.unchanged).toBe(false);
+    expect(result.docs.size).toBe(0);
+  });
+
+  it("resolveBranch only calls API once across multiple fetches", async () => {
+    mockOctokit.rest.git.getRef = vi.fn().mockResolvedValue({
+      data: { object: { sha: "head-sha-1" } },
+    });
+    mockOctokit.rest.git.getCommit = vi.fn().mockResolvedValue({
+      data: { tree: { sha: "tree-sha-1" } },
+    });
+    mockOctokit.rest.git.getTree = vi.fn().mockResolvedValue({
+      data: { tree: [] },
+    });
+
+    await provider.fetch();
+
+    // Reset only the branch-related mocks to track second call
+    const listBranchesCalls = mockOctokit.rest.repos.listBranches.mock.calls.length;
+    const reposGetCalls = mockOctokit.rest.repos.get.mock.calls.length;
+
+    mockOctokit.rest.git.getRef = vi.fn().mockResolvedValue({
+      data: { object: { sha: "head-sha-2" } },
+    });
+    mockOctokit.rest.git.getCommit = vi.fn().mockResolvedValue({
+      data: { tree: { sha: "tree-sha-2" } },
+    });
+    mockOctokit.rest.git.getTree = vi.fn().mockResolvedValue({
+      data: { tree: [] },
+    });
+
+    await provider.fetch();
+
+    // listBranches and repos.get should not have been called again
+    expect(mockOctokit.rest.repos.listBranches.mock.calls.length).toBe(listBranchesCalls);
+    expect(mockOctokit.rest.repos.get.mock.calls.length).toBe(reposGetCalls);
+  });
+
+  it("getSyncState returns current cache and constructor restores it", async () => {
+    // First fetch to populate cache
+    mockOctokit.rest.git.getRef = vi.fn().mockResolvedValue({
+      data: { object: { sha: "head-sha-1" } },
+    });
+    mockOctokit.rest.git.getCommit = vi.fn().mockResolvedValue({
+      data: { tree: { sha: "tree-sha-1" } },
+    });
+    mockOctokit.rest.git.getTree = vi.fn().mockResolvedValue({
+      data: {
+        tree: [
+          { path: ".stash/structure.automerge", type: "blob", sha: "blob-struct" },
+          { path: ".stash/docs/doc1.automerge", type: "blob", sha: "blob-doc1" },
+        ],
+      },
+    });
+    mockOctokit.rest.git.getBlob = vi.fn().mockResolvedValue({
+      data: { content: Buffer.from("test").toString("base64") },
+    });
+
+    await provider.fetch();
+
+    const state = provider.getSyncState();
+    expect(state.lastHeadSha).toBe("head-sha-1");
+    expect(state.blobShas["structure"]).toBe("blob-struct");
+    expect(state.blobShas["doc1"]).toBe("blob-doc1");
+
+    // Create new provider with persisted state
+    const { Octokit } = await import("octokit");
+    const restored = new GitHubProvider("test-token", "owner", "repo", "", "main", state);
+    const restoredMock = (Octokit as any).mock.results[
+      (Octokit as any).mock.results.length - 1
+    ].value;
+    restoredMock.rest.repos.listBranches = vi.fn().mockResolvedValue({
+      data: [{ name: "main" }],
+    });
+    restoredMock.rest.repos.get = vi.fn().mockResolvedValue({
+      data: { default_branch: "main" },
+    });
+
+    // Same HEAD SHA — should return unchanged
+    restoredMock.rest.git.getRef = vi.fn().mockResolvedValue({
+      data: { object: { sha: "head-sha-1" } },
+    });
+
+    const result = await restored.fetch();
+    expect(result.unchanged).toBe(true);
+    expect(result.docs.size).toBe(0);
+  });
+
+  it("push reuses cached HEAD SHA and tree SHA from fetch", async () => {
+    // Fetch first to populate cache
+    mockOctokit.rest.git.getRef = vi.fn().mockResolvedValue({
+      data: { object: { sha: "head-sha-1" } },
+    });
+    mockOctokit.rest.git.getCommit = vi.fn().mockResolvedValue({
+      data: { tree: { sha: "tree-sha-1" } },
+    });
+    mockOctokit.rest.git.getTree = vi.fn().mockResolvedValue({
+      data: { tree: [] },
+    });
+
+    await provider.fetch();
+
+    // Now push — should not call ensureBranchExists, getCommit, or getTree again
+    vi.clearAllMocks();
+    mockOctokit.rest.git.createBlob = vi.fn().mockResolvedValue({
+      data: { sha: "blob-sha" },
+    });
+    mockOctokit.rest.git.createTree = vi.fn().mockResolvedValue({
+      data: { sha: "new-tree-sha" },
+    });
+    mockOctokit.rest.git.createCommit = vi.fn().mockResolvedValue({
+      data: { sha: "new-commit-sha" },
+    });
+    mockOctokit.rest.git.updateRef = vi.fn().mockResolvedValue({ data: {} });
+
+    const docs = createTestDocs();
+    await provider.push({ docs, files: new Map([["hello.md", "Hello!"]]) });
+
+    // Should NOT have called getRef, getCommit, getTree, listBranches, repos.get
+    expect(mockOctokit.rest.git.getRef).not.toHaveBeenCalled();
+    expect(mockOctokit.rest.git.getCommit).not.toHaveBeenCalled();
+    expect(mockOctokit.rest.git.getTree).not.toHaveBeenCalled();
+    expect(mockOctokit.rest.repos?.listBranches).not.toHaveBeenCalled();
+
+    // Should have used cached tree SHA as base_tree
+    const treeCall = mockOctokit.rest.git.createTree.mock.calls[0][0];
+    expect(treeCall.base_tree).toBe("tree-sha-1");
+
+    // Should have used cached HEAD SHA as parent
+    const commitCall = mockOctokit.rest.git.createCommit.mock.calls[0][0];
+    expect(commitCall.parents).toEqual(["head-sha-1"]);
+  });
+
+  it("push updates cached HEAD SHA and tree SHA after commit", async () => {
+    // Fetch to populate cache
+    mockOctokit.rest.git.getRef = vi.fn().mockResolvedValue({
+      data: { object: { sha: "head-sha-1" } },
+    });
+    mockOctokit.rest.git.getCommit = vi.fn().mockResolvedValue({
+      data: { tree: { sha: "tree-sha-1" } },
+    });
+    mockOctokit.rest.git.getTree = vi.fn().mockResolvedValue({
+      data: { tree: [] },
+    });
+
+    await provider.fetch();
+
+    // Push
+    mockOctokit.rest.git.createBlob = vi.fn().mockResolvedValue({
+      data: { sha: "blob-sha" },
+    });
+    mockOctokit.rest.git.createTree = vi.fn().mockResolvedValue({
+      data: { sha: "new-tree-sha" },
+    });
+    mockOctokit.rest.git.createCommit = vi.fn().mockResolvedValue({
+      data: { sha: "new-commit-sha" },
+    });
+    mockOctokit.rest.git.updateRef = vi.fn().mockResolvedValue({ data: {} });
+
+    await provider.push({ docs: createTestDocs(), files: new Map([["hello.md", "Hello!"]]) });
+
+    // After push, next fetch with same new SHA should be unchanged
+    vi.clearAllMocks();
+    mockOctokit.rest.git.getRef = vi.fn().mockResolvedValue({
+      data: { object: { sha: "new-commit-sha" } },
+    });
+
+    const result = await provider.fetch();
+    expect(result.unchanged).toBe(true);
+  });
+
+  describe("with path prefix", () => {
+    let prefixedProvider: GitHubProvider;
+
+    beforeEach(async () => {
+      prefixedProvider = new GitHubProvider("test-token", "owner", "repo", "notes");
+      const { Octokit } = await import("octokit");
+      mockOctokit = (Octokit as any).mock.results[
+        (Octokit as any).mock.results.length - 1
+      ].value;
+      mockOctokit.rest.repos.get = vi.fn().mockResolvedValue({
+        data: { default_branch: "main" },
+      });
+      mockOctokit.rest.repos.listBranches = vi.fn().mockResolvedValue({
+        data: [{ name: "main" }],
+      });
+    });
+
+    it("fetch filters tree entries by path prefix", async () => {
+      const structureBlob = Automerge.save(createStructureDoc());
+
+      mockOctokit.rest.git.getRef = vi.fn().mockResolvedValue({
+        data: { object: { sha: "head-sha-1" } },
+      });
+      mockOctokit.rest.git.getCommit = vi.fn().mockResolvedValue({
+        data: { tree: { sha: "tree-sha-1" } },
+      });
+      mockOctokit.rest.git.getTree = vi.fn().mockResolvedValue({
+        data: {
+          tree: [
+            { path: "notes/.stash/structure.automerge", type: "blob", sha: "blob-1" },
+            { path: "notes/.stash/docs/doc1.automerge", type: "blob", sha: "blob-2" },
+            { path: "other/.stash/structure.automerge", type: "blob", sha: "blob-3" }, // different prefix
+          ],
+        },
+      });
+      mockOctokit.rest.git.getBlob = vi.fn().mockResolvedValue({
+        data: { content: Buffer.from(structureBlob).toString("base64") },
+      });
+
+      const result = await prefixedProvider.fetch();
+
+      // Should only fetch blobs for notes/ prefix (2 blobs), not other/
+      expect(mockOctokit.rest.git.getBlob).toHaveBeenCalledTimes(2);
+      expect(result.docs.has("structure")).toBe(true);
+      expect(result.docs.has("doc1")).toBe(true);
+    });
   });
 });
 
