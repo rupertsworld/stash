@@ -59,6 +59,7 @@ export class Stash {
   // Known paths: tracks files we've seen locally (for distinguishing new vs deleted)
   private knownPaths: Set<string> = new Set();
   private lastPushedSnapshot: SyncSnapshot | null = null;
+  private lastSavedSyncState: string | null = null;
 
   constructor(
     name: string,
@@ -158,11 +159,13 @@ export class Stash {
     }
 
     let lastPushedSnapshot: SyncSnapshot | null = null;
+    let lastSavedSyncState: string | null = null;
     try {
       const syncStateData = await fs.readFile(
         path.join(stashDir, "sync-state.json"),
         "utf-8",
       );
+      lastSavedSyncState = syncStateData;
       const persisted = JSON.parse(syncStateData) as Partial<PersistedSyncState>;
       if ("lastPushedSnapshot" in persisted) {
         lastPushedSnapshot = persisted.lastPushedSnapshot ?? null;
@@ -173,6 +176,7 @@ export class Stash {
 
     const stash = new Stash(name, stashPath, structureDoc, fileDocs, meta, actorId, provider);
     stash.lastPushedSnapshot = lastPushedSnapshot;
+    stash.lastSavedSyncState = lastSavedSyncState;
     await stash.loadKnownPaths();
     return stash;
   }
@@ -760,10 +764,15 @@ export class Stash {
       blobShas: providerSyncState?.blobShas ?? {},
       lastPushedSnapshot: this.lastPushedSnapshot,
     };
+    const serialized = JSON.stringify(persisted, null, 2) + "\n";
+    if (serialized === this.lastSavedSyncState) {
+      return;
+    }
     await atomicWrite(
       path.join(this.path, ".stash", "sync-state.json"),
-      JSON.stringify(persisted, null, 2) + "\n",
+      serialized,
     );
+    this.lastSavedSyncState = serialized;
   }
 
   scheduleSync(): void {
