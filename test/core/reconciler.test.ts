@@ -7,7 +7,7 @@ import { StashReconciler } from "../../src/core/reconciler.js";
 
 const TEST_ACTOR_ID = "test-actor-id";
 
-async function settle(ms = 800): Promise<void> {
+async function settle(ms = 1200): Promise<void> {
   await new Promise((r) => setTimeout(r, ms));
 }
 
