@@ -204,7 +204,6 @@ export class GitHubProvider implements SyncProvider {
 
   private async listRemoteFiles(includeInternal = false): Promise<string[]> {
     try {
-      await this.resolveBranch();
       const { data: ref } = await this.octokit.rest.git.getRef({
         owner: this.owner,
         repo: this.repo,
@@ -403,10 +402,10 @@ export class GitHubProvider implements SyncProvider {
 
     if (docs.size === 0) return;
 
-    await this.resolveBranch();
     this.debug("push: starting", "docs:", docs.size, "files:", files.size);
     let parentSha: string;
     if (this.lastHeadSha) {
+      await this.resolveBranch();
       parentSha = this.lastHeadSha;
     } else {
       parentSha = await this.ensureBranchExists(docs.get("structure"));
@@ -424,13 +423,6 @@ export class GitHubProvider implements SyncProvider {
     if (this.cachedTreeSha) {
       baseTreeSha = this.cachedTreeSha;
       this.debug("push: using cached baseTreeSha", baseTreeSha.slice(0, 7));
-      if (!toDelete) {
-        this.debug("push: getHeadTreeState (for deletion scan)");
-        const state = await this.getHeadTreeState(parentSha);
-        baseTreeSha = state.baseTreeSha;
-        existingFiles = state.files;
-        this.debug("push: baseTreeSha", baseTreeSha.slice(0, 7), "existingFiles:", existingFiles.length);
-      }
     } else if (toDelete) {
       this.debug("push: getCommit (pathsToDelete path)");
       const { data: commit } = await this.octokit.rest.git.getCommit({

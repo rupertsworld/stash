@@ -106,9 +106,11 @@ export class Stash {
       actorId,
       provider,
     );
-    // Fresh stashes start with a baseline snapshot so "connect" does not
-    // immediately treat the empty local state as unpushed local changes.
-    stash.lastPushedSnapshot = stash.buildSyncSnapshot();
+    // Remote-enabled stashes start with a baseline snapshot so "connect"
+    // does not immediately treat empty local state as unpushed local changes.
+    if (provider) {
+      stash.lastPushedSnapshot = stash.buildSyncSnapshot();
+    }
     return stash;
   }
 
@@ -750,6 +752,8 @@ export class Stash {
   }
 
   private async saveSyncState(): Promise<void> {
+    if (!this.provider) return;
+
     const providerSyncState = this.provider?.getSyncState?.();
     const persisted: PersistedSyncState = {
       lastHeadSha: providerSyncState?.lastHeadSha ?? null,
