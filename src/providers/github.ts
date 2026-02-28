@@ -1,5 +1,5 @@
 import { Octokit } from "octokit";
-import type { PushPayload, SyncProvider } from "./types.js";
+import type { FetchResult, PushPayload, SyncProvider, SyncState } from "./types.js";
 
 interface TreeEntry {
   path: string;
@@ -47,13 +47,28 @@ export class GitHubProvider implements SyncProvider {
   private repo: string;
   private pathPrefix: string;
   private branch: string;
+  private lastHeadSha: string | null = null;
+  private cachedBlobShas = new Map<string, string>();
+  private cachedTreeSha: string | null = null;
+  private branchResolved = false;
 
-  constructor(token: string, owner: string, repo: string, pathPrefix = "", branch = "main") {
+  constructor(
+    token: string,
+    owner: string,
+    repo: string,
+    pathPrefix = "",
+    branch = "main",
+    syncState?: SyncState,
+  ) {
     this.octokit = new Octokit({ auth: token });
     this.owner = owner;
     this.repo = repo;
     this.pathPrefix = pathPrefix;
     this.branch = branch;
+    if (syncState) {
+      this.lastHeadSha = syncState.lastHeadSha;
+      this.cachedBlobShas = new Map(Object.entries(syncState.blobShas));
+    }
   }
 
   private prefixPath(path: string): string {
@@ -65,6 +80,36 @@ export class GitHubProvider implements SyncProvider {
     if (process.env.STASH_DEBUG) {
       console.error("[stash]", msg, ...args);
     }
+  }
+
+  getSyncState(): SyncState {
+    return {
+      lastHeadSha: this.lastHeadSha,
+      blobShas: Object.fromEntries(this.cachedBlobShas),
+    };
+  }
+
+  private async resolveBranch(): Promise<void> {
+    if (this.branchResolved) return;
+
+    const { data: branches } = await this.octokit.rest.repos.listBranches({
+      owner: this.owner,
+      repo: this.repo,
+      per_page: 1,
+    });
+
+    // Empty repo: keep requested/default branch name and resolve lazily at bootstrap.
+    if (branches.length === 0) {
+      this.branchResolved = true;
+      return;
+    }
+
+    const { data: repo } = await this.octokit.rest.repos.get({
+      owner: this.owner,
+      repo: this.repo,
+    });
+    this.branch = repo.default_branch ?? "main";
+    this.branchResolved = true;
   }
 
   private async ensureBranchExists(
@@ -94,16 +139,21 @@ export class GitHubProvider implements SyncProvider {
       const sha = data.commit?.sha;
       if (!sha) throw new Error("Missing commit SHA from bootstrap contents API");
       this.debug("createOrUpdateFileContents ok, sha:", sha.slice(0, 7));
+      this.lastHeadSha = sha;
+      this.branchResolved = true;
       return sha;
     }
 
-    this.debug("has branches → repos.get for default_branch");
-    const { data: repo } = await this.octokit.rest.repos.get({
-      owner: this.owner,
-      repo: this.repo,
-    });
-    this.branch = repo.default_branch ?? "main";
-    this.debug("using branch:", this.branch);
+    if (!this.branchResolved) {
+      this.debug("has branches → repos.get for default_branch");
+      const { data: repo } = await this.octokit.rest.repos.get({
+        owner: this.owner,
+        repo: this.repo,
+      });
+      this.branch = repo.default_branch ?? "main";
+      this.branchResolved = true;
+      this.debug("using branch:", this.branch);
+    }
 
     const { data: ref } = await this.octokit.rest.git.getRef({
       owner: this.owner,
@@ -154,6 +204,7 @@ export class GitHubProvider implements SyncProvider {
 
   private async listRemoteFiles(includeInternal = false): Promise<string[]> {
     try {
+      await this.resolveBranch();
       const { data: ref } = await this.octokit.rest.git.getRef({
         owner: this.owner,
         repo: this.repo,
@@ -266,49 +317,85 @@ export class GitHubProvider implements SyncProvider {
     });
   }
 
-  async fetch(): Promise<Map<string, Uint8Array>> {
-    const docs = new Map<string, Uint8Array>();
+  async fetch(): Promise<FetchResult> {
+    await this.resolveBranch();
 
+    let headSha: string;
     try {
-      await this.octokit.rest.repos.get({
+      const { data: ref } = await this.octokit.rest.git.getRef({
         owner: this.owner,
         repo: this.repo,
+        ref: `heads/${this.branch}`,
       });
+      headSha = ref.object.sha;
     } catch (err) {
       const error = err as Error & { status?: number };
       if (error.status === 404) {
-        throw Object.assign(new Error("Remote not found"), { status: 404 });
+        // Empty repo/branch: treat as no remote docs.
+        this.lastHeadSha = null;
+        this.cachedTreeSha = null;
+        this.cachedBlobShas = new Map();
+        return { docs: new Map(), unchanged: false };
       }
       throw err;
     }
 
-    try {
-      // Get structure doc
-      const structureBlob = await this.getFileContent(
-        this.prefixPath(".stash/structure.automerge"),
-      );
-      if (structureBlob) {
-        docs.set("structure", structureBlob);
-      }
-
-      // List and fetch doc files
-      const docFiles = await this.listDirectory(this.prefixPath(".stash/docs"));
-      for (const file of docFiles) {
-        if (!file.endsWith(".automerge")) continue;
-        const docId = file.replace(".automerge", "");
-        const blob = await this.getFileContent(this.prefixPath(`.stash/docs/${file}`));
-        if (blob) docs.set(docId, blob);
-      }
-    } catch (err) {
-      const error = err as Error & { status?: number };
-      if (error.status === 404) {
-        // Repo is empty or .stash doesn't exist yet - that's fine
-        return docs;
-      }
-      throw err;
+    if (headSha === this.lastHeadSha) {
+      return { docs: new Map(), unchanged: true };
     }
 
-    return docs;
+    const { data: commit } = await this.octokit.rest.git.getCommit({
+      owner: this.owner,
+      repo: this.repo,
+      commit_sha: headSha,
+    });
+    const { data: tree } = await this.octokit.rest.git.getTree({
+      owner: this.owner,
+      repo: this.repo,
+      tree_sha: commit.tree.sha,
+      recursive: "true",
+    });
+    this.cachedTreeSha = commit.tree.sha;
+
+    const docs = new Map<string, Uint8Array>();
+    const newBlobShas = new Map<string, string>();
+
+    for (const item of tree.tree) {
+      if (item.type !== "blob" || !item.path || !item.sha) continue;
+
+      let relativePath = item.path;
+      if (this.pathPrefix) {
+        if (!relativePath.startsWith(`${this.pathPrefix}/`)) continue;
+        relativePath = relativePath.slice(this.pathPrefix.length + 1);
+      }
+
+      let docId: string | null = null;
+      if (relativePath === ".stash/structure.automerge") {
+        docId = "structure";
+      } else if (
+        relativePath.startsWith(".stash/docs/") &&
+        relativePath.endsWith(".automerge")
+      ) {
+        docId = relativePath.slice(".stash/docs/".length, -".automerge".length);
+      }
+      if (!docId) continue;
+
+      newBlobShas.set(docId, item.sha);
+      if (this.cachedBlobShas.get(docId) === item.sha) {
+        continue;
+      }
+
+      const { data: blob } = await this.octokit.rest.git.getBlob({
+        owner: this.owner,
+        repo: this.repo,
+        file_sha: item.sha,
+      });
+      docs.set(docId, Uint8Array.from(Buffer.from(blob.content, "base64")));
+    }
+
+    this.lastHeadSha = headSha;
+    this.cachedBlobShas = newBlobShas;
+    return { docs, unchanged: false };
   }
 
   async push(payload: PushPayload): Promise<void> {
@@ -316,8 +403,14 @@ export class GitHubProvider implements SyncProvider {
 
     if (docs.size === 0) return;
 
+    await this.resolveBranch();
     this.debug("push: starting", "docs:", docs.size, "files:", files.size);
-    const parentSha = await this.ensureBranchExists(docs.get("structure"));
+    let parentSha: string;
+    if (this.lastHeadSha) {
+      parentSha = this.lastHeadSha;
+    } else {
+      parentSha = await this.ensureBranchExists(docs.get("structure"));
+    }
     this.debug("push: parentSha", parentSha.slice(0, 7));
 
     // Empty changedPaths (e.g. first sync) => push all. Non-empty => incremental.
@@ -328,7 +421,17 @@ export class GitHubProvider implements SyncProvider {
 
     let baseTreeSha: string;
     let existingFiles: string[] | null = null;
-    if (toDelete) {
+    if (this.cachedTreeSha) {
+      baseTreeSha = this.cachedTreeSha;
+      this.debug("push: using cached baseTreeSha", baseTreeSha.slice(0, 7));
+      if (!toDelete) {
+        this.debug("push: getHeadTreeState (for deletion scan)");
+        const state = await this.getHeadTreeState(parentSha);
+        baseTreeSha = state.baseTreeSha;
+        existingFiles = state.files;
+        this.debug("push: baseTreeSha", baseTreeSha.slice(0, 7), "existingFiles:", existingFiles.length);
+      }
+    } else if (toDelete) {
       this.debug("push: getCommit (pathsToDelete path)");
       const { data: commit } = await this.octokit.rest.git.getCommit({
         owner: this.owner,
@@ -462,6 +565,8 @@ export class GitHubProvider implements SyncProvider {
       ref: `heads/${this.branch}`,
       sha: commit.sha,
     });
+    this.lastHeadSha = commit.sha;
+    this.cachedTreeSha = tree.sha;
     this.debug("updateRef ok, push complete");
   }
 
