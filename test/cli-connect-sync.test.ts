@@ -16,7 +16,7 @@ import * as os from "node:os";
 import { StashManager } from "../src/core/manager.js";
 import { StashReconciler } from "../src/core/reconciler.js";
 import { setGitHubToken } from "../src/core/config.js";
-import type { SyncProvider } from "../src/providers/types.js";
+import type { SyncProvider, FetchResult } from "../src/providers/types.js";
 
 const TEST_ACTOR_ID = "test-actor-connect-sync";
 
@@ -44,8 +44,8 @@ describe("stash connect: should render files to disk after sync", () => {
     const remoteStore = new Map<string, Uint8Array>();
 
     const mockProvider: SyncProvider = {
-      async fetch() {
-        return new Map(remoteStore);
+      async fetch(): Promise<FetchResult> {
+        return { docs: new Map(remoteStore), unchanged: false };
       },
       async push(payload) {
         for (const [key, data] of payload.docs) {
@@ -109,8 +109,8 @@ describe("stash sync: should render updated files to disk after sync", () => {
     const remoteStore = new Map<string, Uint8Array>();
 
     const mockProvider: SyncProvider = {
-      async fetch() {
-        return new Map(remoteStore);
+      async fetch(): Promise<FetchResult> {
+        return { docs: new Map(remoteStore), unchanged: false };
       },
       async push(payload) {
         for (const [key, data] of payload.docs) {
