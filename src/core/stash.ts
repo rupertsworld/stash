@@ -744,10 +744,12 @@ export class Stash {
       );
     }
 
-    await atomicWrite(
-      path.join(stashDir, "sync-state.json"),
-      JSON.stringify(this.buildPersistedSyncState(), null, 2) + "\n",
-    );
+    if (this.provider || this.lastPushedSnapshot) {
+      await atomicWrite(
+        path.join(stashDir, "sync-state.json"),
+        JSON.stringify(this.buildPersistedSyncState(), null, 2) + "\n",
+      );
+    }
 
     await this.saveKnownPaths();
   }

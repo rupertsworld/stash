@@ -683,6 +683,12 @@ describe("GitHubProvider", () => {
       const prefixMock = (Octokit as any).mock.results[
         (Octokit as any).mock.results.length - 1
       ].value;
+      prefixMock.rest.repos.listBranches = vi.fn().mockResolvedValue({
+        data: [{ name: "main" }],
+      });
+      prefixMock.rest.repos.get = vi.fn().mockResolvedValue({
+        data: { default_branch: "main" },
+      });
 
       // Mock listing files via tree API (includes .stash/ when includeInternal=true)
       prefixMock.rest.git.getTree.mockResolvedValue({
