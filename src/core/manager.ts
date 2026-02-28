@@ -11,7 +11,7 @@ import {
   unregisterStash,
   type GlobalConfig,
 } from "./config.js";
-import type { SyncProvider } from "../providers/types.js";
+import type { SyncProvider, SyncState } from "../providers/types.js";
 import { GitHubProvider, parseGitHubRemote } from "../providers/github.js";
 
 // Valid stash name: starts with letter/number, contains only alphanumeric, dots, hyphens, underscores
@@ -29,6 +29,31 @@ function validateStashName(name: string): void {
       "Stash name must start with a letter or number and contain only " +
       "letters, numbers, dots, hyphens, or underscores"
     );
+  }
+}
+
+async function loadProviderSyncState(stashPath: string): Promise<SyncState | undefined> {
+  try {
+    const raw = await fs.readFile(
+      path.join(stashPath, ".stash", "sync-state.json"),
+      "utf-8",
+    );
+    const parsed = JSON.parse(raw) as Partial<SyncState>;
+
+    const lastHeadSha =
+      parsed.lastHeadSha === null || typeof parsed.lastHeadSha === "string"
+        ? parsed.lastHeadSha
+        : null;
+    const blobShas: Record<string, string> = {};
+    if (parsed.blobShas && typeof parsed.blobShas === "object") {
+      for (const [docId, sha] of Object.entries(parsed.blobShas)) {
+        if (typeof sha === "string") blobShas[docId] = sha;
+      }
+    }
+
+    return { lastHeadSha, blobShas };
+  } catch {
+    return undefined;
   }
 }
 
@@ -73,7 +98,15 @@ export class StashManager {
             if (parsed) {
               const token = await getGitHubToken(baseDir);
               if (token) {
-                provider = new GitHubProvider(token, parsed.owner, parsed.repo, parsed.pathPrefix);
+                const syncState = await loadProviderSyncState(stashPath);
+                provider = new GitHubProvider(
+                  token,
+                  parsed.owner,
+                  parsed.repo,
+                  parsed.pathPrefix,
+                  "main",
+                  syncState,
+                );
               }
             }
           }

@@ -42,9 +42,10 @@ export async function createStash(
 
       provider = new GitHubProvider(token, parsed.owner, parsed.repo);
 
-      let remoteDocs: Map<string, Uint8Array>;
+      let remoteDocsSize = 0;
       try {
-        remoteDocs = await provider.fetch();
+        const result = await provider.fetch();
+        remoteDocsSize = result.docs.size;
       } catch (err) {
         const error = err as Error & { status?: number };
         if (error.status === 404) {
@@ -56,13 +57,12 @@ export async function createStash(
           if (provider.create) {
             await provider.create();
           }
-          remoteDocs = new Map();
         } else {
           throw err;
         }
       }
 
-      if (remoteDocs.size > 0) {
+      if (remoteDocsSize > 0) {
         console.error(`Repository ${parsed.owner}/${parsed.repo} already has stash data.`);
         console.error("Use 'stash connect' to join an existing stash.");
         process.exit(1);
@@ -99,9 +99,10 @@ export async function createStash(
       const [owner, repo] = parts;
       provider = new GitHubProvider(token, owner, repo);
 
-      let remoteDocs: Map<string, Uint8Array>;
+      let remoteDocsSize = 0;
       try {
-        remoteDocs = await provider.fetch();
+        const result = await provider.fetch();
+        remoteDocsSize = result.docs.size;
       } catch (err) {
         const error = err as Error & { status?: number };
         if (error.status === 404) {
@@ -116,13 +117,12 @@ export async function createStash(
           if (provider.create) {
             await provider.create();
           }
-          remoteDocs = new Map();
         } else {
           throw err;
         }
       }
 
-      if (remoteDocs.size > 0) {
+      if (remoteDocsSize > 0) {
         console.error(`Repository ${owner}/${repo} already has stash data.`);
         console.error("Use 'stash connect' to join an existing stash.");
         process.exit(1);

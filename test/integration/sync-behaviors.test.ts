@@ -10,7 +10,7 @@ import * as path from "node:path";
 import * as os from "node:os";
 import { Stash } from "../../src/core/stash.js";
 import { StashReconciler } from "../../src/core/reconciler.js";
-import type { SyncProvider } from "../../src/providers/types.js";
+import type { SyncProvider, FetchResult } from "../../src/providers/types.js";
 import type { StructureDoc } from "../../src/core/structure.js";
 
 const ACTOR_A = "a".repeat(64);
@@ -23,8 +23,8 @@ const ACTOR_B = "b".repeat(64);
 class MockRemote implements SyncProvider {
   private remoteDocs: Map<string, Uint8Array> = new Map();
 
-  async fetch(): Promise<Map<string, Uint8Array>> {
-    return new Map(this.remoteDocs);
+  async fetch(): Promise<FetchResult> {
+    return { docs: new Map(this.remoteDocs), unchanged: false };
   }
 
   async push(payload: { docs: Map<string, Uint8Array> }): Promise<void> {

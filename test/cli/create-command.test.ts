@@ -126,7 +126,10 @@ describe("createStash command flow", () => {
   });
 
   it("exits with connect guidance when remote already has stash docs", async () => {
-    fetchMock.mockResolvedValueOnce(new Map([["structure", new Uint8Array([1])]]));
+    fetchMock.mockResolvedValueOnce({
+      docs: new Map([["structure", new Uint8Array([1])]]),
+      unchanged: false,
+    });
     const { createStash } = await import("../../src/cli/commands/create.js");
 
     await expect(
@@ -147,7 +150,10 @@ describe("createStash command flow", () => {
   });
 
   it("syncs on create with remote even when local file count is zero", async () => {
-    fetchMock.mockResolvedValueOnce(new Map());
+    fetchMock.mockResolvedValueOnce({
+      docs: new Map(),
+      unchanged: false,
+    });
     listAllFilesMock.mockReturnValue([]);
     const { createStash } = await import("../../src/cli/commands/create.js");
 
